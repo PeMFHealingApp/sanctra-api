@@ -469,6 +469,99 @@ SACRED_SITES = {
     }
 }
 
+# Countries mapping for sites
+COUNTRIES = {
+    "Egypt": [
+        "Great Pyramid King's Chamber", "Great Pyramid Queen's Chamber", "Great Pyramid Grand Gallery",
+        "Pyramid of Khafre", "Abu Simbel Temple", "Karnak Temple Hypostyle Hall",
+        "Luxor Temple", "Dendera Temple of Hathor", "Philae Temple"
+    ],
+    "India": [
+        "Kailasa Temple Ellora", "Konark Sun Temple", "Brihadeeswarar Temple", "Meenakshi Temple",
+        "Golden Temple", "Jagannath Temple", "Kandariya Mahadev", "Kashi Vishwanath",
+        "Ramanathaswamy Temple", "Virupaksha Temple", "Ajanta Caves", "Elephanta Caves",
+        "Mahabodhi Temple"
+    ],
+    "Nepal": [
+        "Boudhanath Stupa Gallery", "Swayambhunath Caves"
+    ],
+    "Tibet": [
+        "Jokhang Temple", "Potala Palace Chapel", "Tashi Lhunpo Monastery", "Mount Kailash Caves"
+    ],
+    "Cambodia": [
+        "Angkor Wat Outer Galleries", "Angkor Wat Inner Sanctum", "Bayon Temple",
+        "Ta Prohm", "Preah Khan"
+    ],
+    "Indonesia": [
+        "Borobudur Central Stupa", "Borobudur Upper Terraces", "Prambanan Temple", "Tanah Lot Shrine"
+    ],
+    "China": [
+        "Temple of Heaven", "Mogao Caves", "Longmen Grottoes"
+    ],
+    "Japan": [
+        "Todai-ji Daibutsuden", "Horyu-ji", "Kiyomizu-dera", "Fushimi Inari"
+    ],
+    "Greece": [
+        "Parthenon", "Temple of Apollo Delphi", "Theatre of Epidaurus"
+    ],
+    "Italy": [
+        "Pantheon", "St. Peter’s Basilica", "Florence Cathedral", "Basilica di San Marco",
+        "Basilica di San Francesco", "San Vitale"
+    ],
+    "France": [
+        "Chartres Cathedral", "Notre-Dame de Paris", "Mont-Saint-Michel Abbey", "Sainte-Chapelle"
+    ],
+    "Spain": [
+        "Sagrada Família", "Mezquita-Cathedral", "Seville Cathedral"
+    ],
+    "Portugal": [
+        "Jerónimos Monastery"
+    ],
+    "United Kingdom": [
+        "Stonehenge", "Westminster Abbey", "St Paul’s Cathedral", "York Minster", "Rosslyn Chapel"
+    ],
+    "Ireland": [
+        "Newgrange Passage Tomb", "Iona Abbey"
+    ],
+    "Germany": [
+        "Cologne Cathedral", "Frauenkirche Dresden"
+    ],
+    "Austria": [
+        "St. Stephen’s Cathedral"
+    ],
+    "Hungary": [
+        "Matthias Church"
+    ],
+    "Turkey": [
+        "Hagia Sophia", "Blue Mosque", "Chora Church"
+    ],
+    "Israel/Palestine": [
+        "Church of the Holy Sepulchre", "Al-Aqsa Dome of the Rock"
+    ],
+    "Syria": [
+        "Ummayad Mosque"
+    ],
+    "Mexico": [
+        "Chichén Itzá El Castillo", "Teotihuacan Feathered Serpent", "Tulum Temple",
+        "Basilica of Guadalupe"
+    ],
+    "Peru": [
+        "Machu Picchu Sun Temple", "Sacsayhuamán"
+    ],
+    "United States": [
+        "Kiva Spaces Mesa Verde"
+    ],
+    "Ethiopia": [
+        "Lalibela Rock-Hewn Churches"
+    ],
+    "Mali": [
+        "Great Mosque of Djenné"
+    ],
+    "Zimbabwe": [
+        "Great Zimbabwe Enclosures"
+    ]
+}
+
 # Simple IR generation function for Sanctra
 def generate_synthetic_ir(fs=44100, rt60=2.5, length_sec=5, dims=[10.47, 5.235, 5.827], phi=1.618):
     t = np.linspace(0, length_sec, int(fs * length_sec))
@@ -507,11 +600,15 @@ def generate_synthetic_ir(fs=44100, rt60=2.5, length_sec=5, dims=[10.47, 5.235, 
 
 @app.route('/')
 def home():
-    return jsonify({"message": "Welcome to Sanctra API! Use /generate-ir or /sites."})
+    return jsonify({"message": "Welcome to Sanctra API! Use /generate-ir, /sites, or /sites-by-country."})
 
 @app.route('/sites', methods=['GET'])
 def get_sites():
     return jsonify({"sites": list(SACRED_SITES.keys())})
+
+@app.route('/sites-by-country', methods=['GET'])
+def get_sites_by_country():
+    return jsonify(COUNTRIES)
 
 @app.route('/generate-ir', methods=['POST'])
 def generate_ir():
