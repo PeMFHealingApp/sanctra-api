@@ -8,6 +8,7 @@ app = Flask(__name__)
 
 # URL to the raw sacred_sites.json file on GitHub
 SACRED_SITES_JSON_URL = "https://raw.githubusercontent.com/PeMFHealingApp/sanctra-api/main/sacred_sites.json"
+LOCAL_JSON_PATH = os.path.join(os.path.dirname(__file__), "sacred_sites.json")
 
 # Fetch and load the JSON data
 def load_sacred_sites():
