@@ -1,36 +1,35 @@
 from flask import Flask, jsonify, request
 import os
-import requests
 import json
 import math
 
 app = Flask(__name__)
 
-# URL to the raw sacred_sites.json file on GitHub
-SACRED_SITES_JSON_URL = "https://raw.githubusercontent.com/PeMFHealingApp/sanctra-api/main/sacred_sites.json"
+# -----------------------------
+# Local JSON path - single source of truth
+# -----------------------------
 LOCAL_JSON_PATH = os.path.join(os.path.dirname(__file__), "sacred_sites.json")
 
-# Fetch and load the JSON data
-def load_sacred_sites():
-    try:
-        response = requests.get(SACRED_SITES_JSON_URL)
-        response.raise_for_status()  # Raise an error for bad status codes
-        data = response.json()
-        sacred_sites = {site["site"].lower().replace("’", "'").replace("‘", "'").strip(): site for site in data["sacred_sites"]}
-        region_map = {}
-        for site in data["sacred_sites"]:
-            region_map.setdefault(site["region"], []).append(site["site"])
-        return sacred_sites, region_map, data["disclaimer"]
-    except Exception as e:
-        return {}, {}, "The information provided is for educational and exploratory purposes only and should not be considered medical advice. Consult a healthcare professional before using any healing practices."
+# -----------------------------
+# Text normalization
+# -----------------------------
+def norm_text(s: str) -> str:
+    if not isinstance(s, str):
+        return s
+    # unify quotes and dashes, squeeze spaces, lowercase
+    s = (
+        s.replace("’", "'")
+         .replace("‘", "'")
+         .replace("–", "-")
+         .replace("—", "-")
+         .strip()
+         .lower()
+    )
+    return " ".join(s.split())
 
-# Load the data on startup
-SACRED_SITES, REGION_MAP, DISCLAIMER = load_sacred_sites()
-
-# Acoustic analytics (lightweight; no audio)
-C_SOUND = 343.0
-STD_BANDS = [125, 250, 500, 1000, 2000, 4000]
-
+# -----------------------------
+# Numpy-safe JSON conversion
+# -----------------------------
 def np_to_native(x):
     if isinstance(x, (list, tuple)):
         return [np_to_native(i) for i in x]
@@ -39,6 +38,73 @@ def np_to_native(x):
     if isinstance(x, (float, int)):
         return float(x)
     return x
+
+# -----------------------------
+# JSON parsing helpers
+# -----------------------------
+DEFAULT_DISCLAIMER = (
+    "The information provided is for educational and exploratory purposes only "
+    "and should not be considered medical advice. Consult a healthcare professional "
+    "before using any healing practices."
+)
+
+def _parse_payload(data: dict):
+    """
+    Accept either:
+      { "sacred_sites": [ {site, region|country, ...}, ...], "disclaimer": "..." }
+    or a bare list:
+      [ {site, region|country, ...}, ... ]
+    """
+    if isinstance(data, list):
+        sites_list = data
+        disclaimer = DEFAULT_DISCLAIMER
+    else:
+        sites_list = data.get("sacred_sites", [])
+        disclaimer = data.get("disclaimer", DEFAULT_DISCLAIMER)
+    return sites_list, disclaimer
+
+def _build_maps(sites_list):
+    sacred_sites = {}
+    region_map = {}
+    for site in sites_list:
+        site_name = site.get("site", "")
+        key = norm_text(site_name)
+        if not key:
+            # skip malformed entries without a site name
+            continue
+
+        # accept "region" or "country"
+        region_or_country = site.get("region") or site.get("country") or ""
+
+        sacred_sites[key] = site
+        region_map.setdefault(region_or_country, []).append(site_name)
+
+    return sacred_sites, region_map
+
+def load_sacred_sites():
+    try:
+        with open(LOCAL_JSON_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        sites_list, disclaimer = _parse_payload(data)
+        sacred_sites, region_map = _build_maps(sites_list)
+        if sacred_sites:
+            return sacred_sites, region_map, disclaimer
+    except Exception as e:
+        print("Failed to load sacred_sites.json:", e)
+
+    # last-resort empty structures
+    return {}, {}, DEFAULT_DISCLAIMER
+
+# -----------------------------
+# Load once on startup
+# -----------------------------
+SACRED_SITES, REGION_MAP, DISCLAIMER = load_sacred_sites()
+
+# -----------------------------
+# Acoustic analytics (lightweight, no audio)
+# -----------------------------
+C_SOUND = 343.0
+STD_BANDS = [125, 250, 500, 1000, 2000, 4000]
 
 def room_volume(dims):
     L, W, H = dims
@@ -126,13 +192,16 @@ def early_reflections(dims, alpha_avg, n=6):
     total = sum(e for _, e in taps) or 1.0
     return [[t, e / total] for t, e in taps]
 
+# -----------------------------
 # Routes
+# -----------------------------
 @app.route("/")
 def home():
     return jsonify({
         "message": "Welcome to Sanctra API (lightweight simulation only)",
         "endpoints": [
             "/health",
+            "/reload",
             "/sites",
             "/countries",
             "/sites-by-country",
@@ -140,13 +209,24 @@ def home():
             "/site-info?site=...",
             "/generate-ir"
         ],
-        "note": "POST /generate-ir returns compact JSON acoustic analytics (no audio).",
+        "note": "POST /generate-ir returns compact JSON acoustic analytics.",
+        "cache_sizes": {
+            "sites": len(SACRED_SITES),
+            "countries": len(REGION_MAP)
+        },
         "disclaimer": DISCLAIMER
     })
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok"}), 200
+    ok = bool(SACRED_SITES)
+    return jsonify({"status": "ok" if ok else "degraded", "sites_cached": len(SACRED_SITES)}), 200
+
+@app.route("/reload", methods=["POST"])
+def reload_cache():
+    global SACRED_SITES, REGION_MAP, DISCLAIMER
+    SACRED_SITES, REGION_MAP, DISCLAIMER = load_sacred_sites()
+    return jsonify({"reloaded": True, "sites": len(SACRED_SITES)}), 200
 
 @app.route("/sites", methods=["GET"])
 def get_sites():
@@ -167,8 +247,8 @@ def sites_for_country():
     country = request.args.get("country", type=str)
     if not country:
         return jsonify({"error": "Missing 'country'"}), 400
-    lc_map = {r.lower(): r for r in REGION_MAP.keys()}
-    key = lc_map.get(country.lower())
+    lc_map = {norm_text(r): r for r in REGION_MAP.keys()}
+    key = lc_map.get(norm_text(country))
     if not key:
         return jsonify({"error": f"Unknown country '{country}'", "hint": "GET /countries"}), 404
     return jsonify({"country": key, "sites": sorted(REGION_MAP[key])}), 200
@@ -178,23 +258,29 @@ def site_info():
     site = request.args.get("site", type=str)
     if not site:
         return jsonify({"error": "Missing 'site' query parameter", "hint": "Use /sites to list valid names"}), 400
-    site_k = site.lower().replace("’", "'").replace("‘", "'").strip()
+    site_k = norm_text(site)
     if site_k not in SACRED_SITES:
         return jsonify({"error": f"Site '{site}' not found", "hint": "Use /sites to list valid names"}), 404
+
     info = SACRED_SITES[site_k]
+    # allow alternate keys if present
+    geometry_notes = info.get("geometry", info.get("sacred_geometry_notes", ""))
+    sim_method = info.get("sim_method", info.get("simulation_method", ""))
+
     info_out = {
-        "site": info.get("site", site_k),
-        "region": info.get("region", ""),
+        "site": info.get("site", site),
+        "region": info.get("region", info.get("country", "")),
         "status": info.get("status", ""),
         "rt60": info.get("rt60"),
         "dims": info.get("dims"),
-        "geometry": info.get("geometry", ""),
+        "geometry": geometry_notes,
         "description": info.get("description", ""),
         "why_sacred": info.get("why_sacred", ""),
         "who_for": info.get("who_for", ""),
         "health_benefits": info.get("health_benefits", ""),
-        "sim_method": info.get("sim_method", ""),
-        "sources": info.get("sources", "")
+        "sim_method": sim_method,
+        "sources": info.get("sources", ""),
+        "disclaimer": DISCLAIMER
     }
     return jsonify(np_to_native(info_out)), 200
 
@@ -205,28 +291,34 @@ def generate_ir():
         site = data.get("site")
         if not site:
             return jsonify({"error": "Missing 'site'"}), 400
-        site_k = site.lower().replace("’", "'").replace("‘", "'").strip()
+
+        site_k = norm_text(site)
         if site_k not in SACRED_SITES:
             return jsonify({"error": f"Site '{site}' not found"}), 404
+
         bands = data.get("bands", STD_BANDS)
-        try:
-            bands = [int(b) for b in bands]
-        except Exception:
-            return jsonify({"error": "bands must be a list of integers"}), 400
+        bands = [int(b) for b in bands]
+
         fmax = float(data.get("fmax_hz", 2000.0))
         top_n = int(data.get("modes_top_n", 24))
         info = SACRED_SITES[site_k]
+
         dims = [float(x) for x in info["dims"]]
         base_rt = float(info["rt60"])
+
         V = room_volume(dims)
         S = room_surface(dims)
         rt60_by_band = rt60_tilt_by_band(base_rt, bands)
         alpha_avg = avg_absorption_from_rt60(base_rt, V, S)
         fs = schroeder_frequency(base_rt, V)
         tail_ref = float(min(3.0, max(1.0, base_rt)))
+
+        geometry_notes = info.get("geometry", info.get("sacred_geometry_notes", ""))
+        sim_method = info.get("sim_method", info.get("simulation_method", ""))
+
         payload = {
-            "site": info.get("site", site_k),
-            "region": info.get("region", ""),
+            "site": info.get("site", site),
+            "region": info.get("region", info.get("country", "")),
             "status": info.get("status", ""),
             "dims_m": dims,
             "volume_m3": V,
@@ -238,15 +330,18 @@ def generate_ir():
             "early_reflection_taps": early_reflections(dims, alpha_avg, n=6),
             "ir_tail_sec_reference": tail_ref,
             "method": "simulation_only_shoebox_analytics",
-            "notes": info.get("geometry", ""),
+            "notes": geometry_notes,
             "description": info.get("description", ""),
             "why_sacred": info.get("why_sacred", ""),
             "who_for": info.get("who_for", ""),
             "health_benefits": info.get("health_benefits", ""),
-            "sim_method": info.get("sim_method", ""),
-            "sources": info.get("sources", "")
+            "sim_method": sim_method,
+            "sources": info.get("sources", ""),
+            "disclaimer": DISCLAIMER
         }
         return jsonify(np_to_native(payload)), 200
+    except ValueError:
+        return jsonify({"error": "bands must be a list of integers"}), 400
     except Exception as e:
         return jsonify({"error": "simulation failed", "detail": str(e)}), 500
 
