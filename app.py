@@ -8,10 +8,13 @@ app = Flask(__name__)
 # Dictionary of sacred sites with RT60, dimensions, and geometry notes
 SACRED_SITES = {
     "Great Pyramid King's Chamber": {
-        "rt60": 2.5,
-        "dims": [10.47, 5.235, 5.827],
-        "geometry": "Golden ratio (height:width≈φ/2), length:width=2:1, ~121 Hz resonance"
-    },
+    "rt60": 2.5,
+    "dims": [10.47, 5.235, 5.827],
+    "geometry": "Golden ratio (height:width≈φ/2), length:width=2:1, ~121 Hz resonance",
+    "description": "The King's Chamber is a remarkable granite room in the Great Pyramid of Giza, an architectural marvel supporting massive weight and featuring a sarcophagus, special for its potential astronomical alignments and symbolic representation of heavenly redemption.",
+    "benefits": "Provides meditative resonance for spiritual initiation and relaxation; ideal for those seeking ancient mysteries or sound therapy.",
+    "disclaimer": "This is a simulated representation; consult historical sources for accuracy."
+},
     "Great Pyramid Queen's Chamber": {
         "rt60": 1.5,
         "dims": [5.75, 5.23, 6.23],
