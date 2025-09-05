@@ -522,8 +522,8 @@
       "region": "China",
       "site": "Temple of Heaven (Echo Wall) — Beijing",
       "status": "Modeled/Simulated",
-      "rt60": 2.0,  // Adjusted lower for a thinner, more open wall structure
-      "dims": [38.0, 5.0, 5.0],  // Approximated as a wall with reduced height and width
+      "rt60": 2.0,  
+      "dims": [38.0, 5.0, 5.0],  
       "geometry": "Circular wall with focused acoustic reflections.",
       "sim_method": "Focused reflections.",
       "sources": "Echo wall.",
@@ -536,8 +536,8 @@
       "region": "China",
       "site": "Temple of Heaven (Hall of Prayer) — Beijing",
       "status": "Modeled/Simulated",
-      "rt60": 5.0,  // Retained from original as it fits a larger enclosed space
-      "dims": [38.0, 38.0, 38.0],  // Original cubic approximation for the hall
+      "rt60": 5.0,  
+      "dims": [38.0, 38.0, 38.0],  
       "geometry": "Circular hall with 3 tiers, ratios 9:3:1 (sacred 9).",
       "sim_method": "Focused reflections.",
       "sources": "Imperial prayers.",
