@@ -562,7 +562,19 @@ COUNTRIES = {
     ]
 }
 
-# Simple IR generation function for Sanctra
+# Calculate fundamental frequency based on dimensions and sacred geometry
+def calculate_fundamental_frequency(dims, phi=1.618):
+    c = 343  # Speed of sound in m/s
+    Lx, Ly, Lz = dims
+    # Use longest dimension for fundamental mode (l=1, m=0, n=0)
+    f = (c / 2) * (1 / max(Lx, Ly, Lz))
+    # Adjust by phi for sacred geometry resonance
+    f_adjusted = f * phi
+    # Ensure frequency is in 20-100 Hz range
+    f_adjusted = max(20, min(100, f_adjusted))
+    return f_adjusted
+
+# Generate synthetic IR
 def generate_synthetic_ir(fs=44100, rt60=2.5, length_sec=5, dims=[10.47, 5.235, 5.827], phi=1.618):
     t = np.linspace(0, length_sec, int(fs * length_sec))
     beta = np.log(1000) / rt60
@@ -596,11 +608,35 @@ def generate_synthetic_ir(fs=44100, rt60=2.5, length_sec=5, dims=[10.47, 5.235, 
                 spec[idx] *= 1.2
     ir = np.fft.irfft(spec, len(t))
     ir /= np.max(np.abs(ir))
-    return ir.tolist()
+    return ir
+
+# Generate subtle sub-tone and air sound, convolved with IR
+def generate_tone(fs=44100, rt60=2.5, dims=[10.47, 5.235, 5.827], phi=1.618, length_sec=5, pulse=True):
+    t = np.linspace(0, length_sec, int(fs * length_sec))
+    # Calculate site-specific frequency
+    freq = calculate_fundamental_frequency(dims, phi)
+    # Generate sine wave (sub-tone, amplitude 0.1 for subtlety)
+    tone = 0.1 * np.sin(2 * np.pi * freq * t)
+    # Apply pulsing envelope tied to RT60 if requested
+    if pulse:
+        envelope = np.exp(-t / (rt60 / 3))  # Decay over ~RT60/3 for subtle pulsing
+        tone *= envelope
+    # Generate air sound (low-pass filtered white noise, amplitude 0.05)
+    noise = np.random.normal(0, 1, len(t))
+    b, a = signal.butter(4, 500 / (fs / 2), btype='low')  # Low-pass at 500 Hz
+    air = 0.05 * signal.filtfilt(b, a, noise)
+    # Combine tone and air sound
+    signal_combined = tone + air
+    signal_combined /= np.max(np.abs(signal_combined))  # Normalize
+    # Convolve with IR
+    ir = generate_synthetic_ir(fs, rt60, length_sec, dims, phi)
+    output = signal.convolve(signal_combined, ir, mode='full')[:len(t)]
+    output /= np.max(np.abs(output))  # Normalize
+    return output.tolist()
 
 @app.route('/')
 def home():
-    return jsonify({"message": "Welcome to Sanctra API! Use /generate-ir, /sites, or /sites-by-country."})
+    return jsonify({"message": "Welcome to Sanctra API! Use /generate-ir, /sites, /sites-by-country, or /generate-tone."})
 
 @app.route('/sites', methods=['GET'])
 def get_sites():
@@ -626,6 +662,27 @@ def generate_ir():
         "dimensions": dims,
         "geometry": geometry,
         "ir_data": ir_data[:1000]  # Limit response size
+    })
+
+@app.route('/generate-tone', methods=['POST'])
+def generate_tone_endpoint():
+    data = request.get_json()
+    site = data.get('site', 'Great Pyramid King\'s Chamber')
+    pulse = data.get('pulse', True)  # Default to pulsing
+    if site not in SACRED_SITES:
+        return jsonify({"error": "Site not found, use /sites to see available sites"}), 400
+    rt60 = SACRED_SITES[site]['rt60']
+    dims = SACRED_SITES[site]['dims']
+    geometry = SACRED_SITES[site]['geometry']
+    # Generate tone
+    fs = 44100
+    tone_data = generate_tone(fs=fs, rt60=rt60, dims=dims, pulse=pulse)
+    return jsonify({
+        "site": site,
+        "rt60": rt60,
+        "dimensions": dims,
+        "geometry": geometry,
+        "tone_data": tone_data[:1000]  # Limit response size
     })
 
 if __name__ == '__main__':
