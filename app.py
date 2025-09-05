@@ -1168,6 +1168,11 @@ def generate_binaural_isochronic_tone(fs=44100, rt60=2.5, dims=[10.47, 5.235, 5.
 def home():
     return jsonify({"message": "Welcome to Sanctra API! Use /generate-ir, /sites, /sites-by-country, or /generate-tone."})
 
+
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({"status": "ok"}), 200
+
 @app.route('/sites', methods=['GET'])
 def get_sites():
     return jsonify({"sites": list(SACRED_SITES.keys())})
@@ -1185,16 +1190,21 @@ def site_info():
     Example: /site-info?site=Great%20Pyramid%20King%27s%20Chamber
     """
     from flask import request, jsonify
-    site = request.args.get('site', type=str)
-    if not site:
-        return jsonify({"error": "Missing 'site' query parameter", "hint": "Use /sites to list valid names"}), 400
-    if site not in SACRED_SITES:
-        return jsonify({"error": f"Site '{site}' not found", "hint": "Use /sites to list valid names"}), 404
-    info = SACRED_SITES[site]
-    out = {"site": site}
-    out.update(info)
-    return jsonify(out)
-
+    try:
+        site = request.args.get('site', type=str)
+        if not site:
+            return jsonify({"error": "Missing 'site' query parameter", "hint": "Use /sites to list valid names"}), 400
+        # Normalize common encodings (smart quotes to ASCII)
+        site = site.replace("’", "'").replace("‘", "'")
+        if site not in SACRED_SITES:
+            return jsonify({"error": f"Site '{site}' not found", "hint": "Use /sites to list valid names"}), 404
+        info = SACRED_SITES[site]
+        out = {"site": site}
+        out.update(info)
+        return jsonify(out), 200
+    except Exception as e:
+        # Return a JSON 500 instead of crashing (avoids Render 502)
+        return jsonify({"error": "Unhandled server error", "detail": str(e)}), 500
 @app.route('/generate-ir', methods=['POST'])
 def generate_ir():
     data = request.get_json()
