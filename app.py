@@ -1176,6 +1176,25 @@ def get_sites():
 def get_sites_by_country():
     return jsonify(COUNTRIES)
 
+
+@app.route('/site-info', methods=['GET'])
+def site_info():
+    """
+    Return metadata for a single site.
+    Query param: site=<exact site name>
+    Example: /site-info?site=Great%20Pyramid%20King%27s%20Chamber
+    """
+    from flask import request, jsonify
+    site = request.args.get('site', type=str)
+    if not site:
+        return jsonify({"error": "Missing 'site' query parameter", "hint": "Use /sites to list valid names"}), 400
+    if site not in SACRED_SITES:
+        return jsonify({"error": f"Site '{site}' not found", "hint": "Use /sites to list valid names"}), 404
+    info = SACRED_SITES[site]
+    out = {"site": site}
+    out.update(info)
+    return jsonify(out)
+
 @app.route('/generate-ir', methods=['POST'])
 def generate_ir():
     data = request.get_json()
