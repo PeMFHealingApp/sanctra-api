@@ -130,7 +130,7 @@ def parse_dims_to_lwh(s:str) -> tuple[float,float,float]:
     - '57x50x48'
     - 'Dome 31m diam, 55m high'
     - '205m long' -> (205, 10, 5) as corridor proxy
-    - 'overall' / 'base' -> take numbers in order; if only 2, repeat min for H
+    - If only two numbers, reuse the smaller as height
     Fallback: (10,10,10)
     """
     if not s: return (10.0,10.0,10.0)
@@ -143,7 +143,6 @@ def parse_dims_to_lwh(s:str) -> tuple[float,float,float]:
     if dmatch: diam = float(dmatch.group(1))
     if hmatch: height = float(hmatch.group(1))
     if diam is not None and height is not None:
-        # approximate dome cell as (diam, diam, height)
         return (float(diam), float(diam), float(height))
     # corridor "long"
     lmatch = re.search(r"(\d+(?:\.\d+)?)\s*m\s*(?:long|length)", s)
@@ -156,7 +155,6 @@ def parse_dims_to_lwh(s:str) -> tuple[float,float,float]:
     if len(vals) >= 3:
         return (vals[0], vals[1], vals[2])
     if len(vals) == 2:
-        # assume base rectangle with modest height
         H = min(vals)
         return (vals[0], vals[1], H)
     if len(vals) == 1:
@@ -202,7 +200,7 @@ def parse_tsv_block(tsv:str):
             "geometry": notes_geom,
             "sim_method": sim_method,
             "sources": sources,
-            "parse_notes": None  # reserved for parser hints if needed
+            "parse_notes": None
         })
     return rows
 
@@ -217,7 +215,6 @@ REGION_MAP = {}  # {Region: [sites...]}
 for r in SITE_ROWS:
     k = _key(r["site"])
     if k in SACRED_SITES:
-        # keep first; ignore duplicates
         continue
     SACRED_SITES[k] = {
         "rt60": r["rt60"],
@@ -227,6 +224,7 @@ for r in SITE_ROWS:
         "sim_method": r["sim_method"],
         "sources": r["sources"],
         "region": r["region"],
+        "display_name": r["site"],  # keep original punctuation for UI
     }
     REGION_MAP.setdefault(r["region"], []).append(r["site"])
 
@@ -335,7 +333,15 @@ def early_reflections(dims, alpha_avg, n=6):
 def home():
     return jsonify({
         "message": "Welcome to Sanctra API (lightweight simulation only)",
-        "endpoints": ["/health", "/sites", "/sites-by-country", "/site-info?site=...", "/generate-ir"],
+        "endpoints": [
+            "/health",
+            "/sites",
+            "/countries",
+            "/sites-by-country",
+            "/sites-for-country?country=...",
+            "/site-info?site=...",
+            "/generate-ir"
+        ],
         "note": "POST /generate-ir returns compact JSON acoustic analytics (no audio)."
     })
 
@@ -345,15 +351,43 @@ def health():
 
 @app.route("/sites", methods=["GET"])
 def get_sites():
-    return jsonify({"sites": sorted(SACRED_SITES.keys())})
+    # Return display names for best UX (preserve punctuation)
+    names = [info.get("display_name", k) for k, info in SACRED_SITES.items()]
+    return jsonify({"sites": sorted(names)})
 
 @app.route("/sites-by-country", methods=["GET"])
 def sites_by_country():
-    # Derived from Region column (left of ' / ' in 'Region/Site')
-    mapping = {}
-    for region, names in REGION_MAP.items():
-        mapping[region] = sorted(names)
+    """
+    Returns the full mapping {country: [sites...]} to populate both dropdowns in one call.
+    """
+    mapping = {region: sorted(names) for region, names in sorted(REGION_MAP.items())}
     return jsonify(mapping)
+
+@app.route("/countries", methods=["GET"])
+def list_countries():
+    """
+    Returns just the list of region/country names for a simple dropdown.
+    """
+    return jsonify({"countries": sorted(REGION_MAP.keys())})
+
+@app.route("/sites-for-country", methods=["GET"])
+def sites_for_country():
+    """
+    Query param: ?country=Egypt
+    Returns the sites for that region only.
+    Case-insensitive match, but returns canonical region casing.
+    """
+    country = request.args.get("country", type=str)
+    if not country:
+        return jsonify({"error": "Missing 'country'"}), 400
+
+    # Case-insensitive lookup
+    lc_map = {r.lower(): r for r in REGION_MAP.keys()}
+    key = lc_map.get(country.lower())
+    if not key:
+        return jsonify({"error": f"Unknown country '{country}'", "hint": "GET /countries"}), 404
+
+    return jsonify({"country": key, "sites": sorted(REGION_MAP[key])}), 200
 
 @app.route("/site-info", methods=["GET"])
 def site_info():
@@ -361,12 +395,25 @@ def site_info():
     if not site:
         return jsonify({"error":"Missing 'site' query parameter","hint":"Use /sites to list valid names"}), 400
     site_k = _key(site)
+    # Allow lookup by either canonical key OR display name
     if site_k not in SACRED_SITES:
-        return jsonify({"error": f"Site '{site}' not found","hint":"Use /sites to list valid names"}), 404
+        # try to match against display_name keys
+        alt = { _key(v.get("display_name", k)): k for k,v in SACRED_SITES.items() }
+        if site_k in alt:
+            site_k = alt[site_k]
+        else:
+            return jsonify({"error": f"Site '{site}' not found","hint":"Use /sites to list valid names"}), 404
+
     info = dict(SACRED_SITES[site_k])
     info_out = {
-        "site": site_k,
-        **info
+        "site": info.get("display_name", site_k),
+        "region": info.get("region",""),
+        "status": info.get("status",""),
+        "rt60": info.get("rt60"),
+        "dims": info.get("dims"),
+        "geometry": info.get("geometry",""),
+        "sim_method": info.get("sim_method",""),
+        "sources": info.get("sources",""),
     }
     return jsonify(np_to_native(info_out)), 200
 
@@ -391,7 +438,11 @@ def generate_ir():
             return jsonify({"error":"Missing 'site'"}), 400
         site_k = _key(site)
         if site_k not in SACRED_SITES:
-            return jsonify({"error": f"Site '{site}' not found"}), 404
+            # allow display-name lookup too
+            alt = { _key(v.get("display_name", k)): k for k,v in SACRED_SITES.items() }
+            site_k = alt.get(site_k)
+            if not site_k:
+                return jsonify({"error": f"Site '{site}' not found"}), 404
 
         bands = data.get("bands", STD_BANDS)
         try:
@@ -414,7 +465,7 @@ def generate_ir():
         tail_ref = float(min(3.0, max(1.0, base_rt)))
 
         payload = {
-            "site": site_k,
+            "site": info.get("display_name", site_k),
             "region": info.get("region",""),
             "status": info.get("status",""),
             "dims_m": dims,
