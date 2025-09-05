@@ -415,7 +415,7 @@ SACRED_SITES = {
     "Chichén Itzá El Castillo": {
         "rt60": 1.5,
         "dims": [55.3, 55.3, 30.0],
-        "geometry": "365 steps (calendar); chirp echo from stairs (diffraction geometry); equinox serpent shadow"
+        "geometry": "365 steps (calendar); chirp echo from stairs; equinox serpent shadow"
     },
     "Teotihuacan Feathered Serpent": {
         "rt60": 3.0,
@@ -562,32 +562,41 @@ COUNTRIES = {
     ]
 }
 
-# Calculate fundamental frequency based on dimensions and sacred geometry
 def calculate_fundamental_frequency(dims, phi=1.618):
     c = 343  # Speed of sound in m/s
     Lx, Ly, Lz = dims
-    # Use longest dimension for fundamental mode (l=1, m=0, n=0)
     f = (c / 2) * (1 / max(Lx, Ly, Lz))
-    # Adjust by phi for sacred geometry resonance
     f_adjusted = f * phi
-    # Ensure frequency is in 20-100 Hz range
     f_adjusted = max(20, min(100, f_adjusted))
     return f_adjusted
 
-# Generate synthetic IR
-def generate_synthetic_ir(fs=44100, rt60=2.5, length_sec=5, dims=[10.47, 5.235, 5.827], phi=1.618):
+def calculate_binaural_delta(base_freq, phi=1.618):
+    delta = base_freq / phi
+    delta = max(2, min(8, delta))  # Constrain to 2-8 Hz for meditative effect
+    return delta
+
+def calculate_isochronic_rate(dims):
+    c = 343  # Speed of sound in m/s
+    sorted_dims = sorted(dims, reverse=True)
+    second_dim = sorted_dims[1]
+    f = (c / 2) * (1 / second_dim)
+    f = max(2, min(10, f))  # Constrain to 2-10 Hz for isochronic pulsing
+    return f
+
+def generate_synthetic_ir(fs=44100, rt60=2.5, length_sec=1, dims=[10.47, 5.235, 5.827], phi=1.618):
     t = np.linspace(0, length_sec, int(fs * length_sec))
     beta = np.log(1000) / rt60
     noise = np.random.normal(0, 1, len(t))
     tail = noise * np.exp(-beta * t)
-    # Early reflections
-    er_times = np.linspace(0.01, 0.1, 5)
+    max_dim = max(dims)
+    reflection_delay = max_dim / 343
+    er_times = np.linspace(0.005, min(0.15, reflection_delay), 6)
     er = np.zeros(len(t))
     for et in er_times:
         idx = int(et * fs)
-        er[idx] = np.random.uniform(0.5, 1.0)
+        if idx < len(t):
+            er[idx] = np.random.uniform(0.3, 0.9)
     ir = signal.convolve(er, tail[:len(er)])[:len(t)]
-    # Room modes for sacred geometry
     c = 343
     modes = []
     for l in range(3):
@@ -598,41 +607,45 @@ def generate_synthetic_ir(fs=44100, rt60=2.5, length_sec=5, dims=[10.47, 5.235, 
                 modes.append(f)
     freqs = np.fft.rfftfreq(len(t), 1/fs)
     spec = np.fft.rfft(ir)
-    for mode in sorted(modes)[:5]:
+    for mode in sorted(modes)[:6]:
         idx = np.argmin(np.abs(freqs - mode))
         spec[idx] *= phi
         for mult in [phi, phi**2]:
             harm = mode * mult
             if harm < fs/2:
                 idx = np.argmin(np.abs(freqs - harm))
-                spec[idx] *= 1.2
+                spec[idx] *= 1.3
     ir = np.fft.irfft(spec, len(t))
-    ir /= np.max(np.abs(ir))
+    ir /= np.max(np.abs(ir)) * 0.7
     return ir
 
-# Generate subtle sub-tone and air sound, convolved with IR
-def generate_tone(fs=44100, rt60=2.5, dims=[10.47, 5.235, 5.827], phi=1.618, length_sec=5, pulse=True):
+def generate_binaural_isochronic_tone(fs=44100, rt60=2.5, dims=[10.47, 5.235, 5.827], phi=1.618, length_sec=1, pulse=True):
     t = np.linspace(0, length_sec, int(fs * length_sec))
-    # Calculate site-specific frequency
-    freq = calculate_fundamental_frequency(dims, phi)
-    # Generate sine wave (sub-tone, amplitude 0.1 for subtlety)
-    tone = 0.1 * np.sin(2 * np.pi * freq * t)
-    # Apply pulsing envelope tied to RT60 if requested
+    base_freq = calculate_fundamental_frequency(dims, phi)
+    delta_freq = calculate_binaural_delta(base_freq, phi)
+    pulse_rate = calculate_isochronic_rate(dims)
+    left_tone = 0.15 * np.sin(2 * np.pi * base_freq * t)
+    right_tone = 0.15 * np.sin(2 * np.pi * (base_freq + delta_freq) * t)
     if pulse:
-        envelope = np.exp(-t / (rt60 / 3))  # Decay over ~RT60/3 for subtle pulsing
-        tone *= envelope
-    # Generate air sound (low-pass filtered white noise, amplitude 0.05)
+        envelope = 0.5 * (1 + np.sin(2 * np.pi * pulse_rate * t))
+        left_tone *= envelope
+        right_tone *= envelope
+    max_dim = max(dims)
+    lowpass_freq = 400 + (max_dim / max([max(data['dims']) for data in SACRED_SITES.values()])) * 200
     noise = np.random.normal(0, 1, len(t))
-    b, a = signal.butter(4, 500 / (fs / 2), btype='low')  # Low-pass at 500 Hz
-    air = 0.05 * signal.filtfilt(b, a, noise)
-    # Combine tone and air sound
-    signal_combined = tone + air
-    signal_combined /= np.max(np.abs(signal_combined))  # Normalize
-    # Convolve with IR
+    b, a = signal.butter(4, lowpass_freq / (fs / 2), btype='low')
+    air = 0.02 * signal.filtfilt(b, a, noise)
+    signal_combined_left = left_tone + air
+    signal_combined_right = right_tone + air
+    signal_combined_left /= np.max(np.abs(signal_combined_left))
+    signal_combined_right /= np.max(np.abs(signal_combined_right))
     ir = generate_synthetic_ir(fs, rt60, length_sec, dims, phi)
-    output = signal.convolve(signal_combined, ir, mode='full')[:len(t)]
-    output /= np.max(np.abs(output))  # Normalize
-    return output.tolist()
+    output_left = signal.convolve(signal_combined_left, ir, mode='full')[:len(t)]
+    output_right = signal.convolve(signal_combined_right, ir, mode='full')[:len(t)]
+    output_left /= np.max(np.abs(output_left))
+    output_right /= np.max(np.abs(output_right))
+    output_stereo = np.stack((output_left, output_right), axis=1)
+    return output_stereo.tolist()
 
 @app.route('/')
 def home():
@@ -655,34 +668,33 @@ def generate_ir():
     rt60 = SACRED_SITES[site]['rt60']
     dims = SACRED_SITES[site]['dims']
     geometry = SACRED_SITES[site]['geometry']
-    ir_data = generate_synthetic_ir(rt60=rt60, dims=dims)
+    ir_data = generate_synthetic_ir(fs=44100, rt60=rt60, dims=dims)
     return jsonify({
         "site": site,
         "rt60": rt60,
         "dimensions": dims,
         "geometry": geometry,
-        "ir_data": ir_data[:1000]  # Limit response size
+        "ir_data": ir_data[:44100]  # ~1s
     })
 
 @app.route('/generate-tone', methods=['POST'])
 def generate_tone_endpoint():
     data = request.get_json()
     site = data.get('site', 'Great Pyramid King\'s Chamber')
-    pulse = data.get('pulse', True)  # Default to pulsing
+    pulse = data.get('pulse', True)
     if site not in SACRED_SITES:
         return jsonify({"error": "Site not found, use /sites to see available sites"}), 400
     rt60 = SACRED_SITES[site]['rt60']
     dims = SACRED_SITES[site]['dims']
     geometry = SACRED_SITES[site]['geometry']
-    # Generate tone
     fs = 44100
-    tone_data = generate_tone(fs=fs, rt60=rt60, dims=dims, pulse=pulse)
+    tone_data = generate_binaural_isochronic_tone(fs=fs, rt60=rt60, dims=dims, pulse=pulse)
     return jsonify({
         "site": site,
         "rt60": rt60,
         "dimensions": dims,
         "geometry": geometry,
-        "tone_data": tone_data[:1000]  # Limit response size
+        "tone_data": tone_data[:44100]  # ~1s, stereo (left, right)
     })
 
 if __name__ == '__main__':
