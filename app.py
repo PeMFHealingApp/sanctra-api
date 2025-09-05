@@ -1222,25 +1222,186 @@ def generate_ir():
         "geometry": geometry,
         "ir_data": ir_data[:44100]  # ~1s
     })
+@app.route('/generate-ir', methods=['POST'])
+def generate_ir():
+    """
+    Simulation-only endpoint: returns a compact JSON "acoustic fingerprint" for a site.
+    No audio is returned. Designed to be light on CPU and memory.
+    """
+    from flask import request, jsonify
+    import numpy as np, math
 
-@app.route('/generate-tone', methods=['POST'])
-def generate_tone_endpoint():
-    data = request.get_json()
-    site = data.get('site', 'Great Pyramid King\'s Chamber')
-    pulse = data.get('pulse', True)
-    if site not in SACRED_SITES:
-        return jsonify({"error": "Site not found, use /sites to see available sites"}), 400
-    rt60 = SACRED_SITES[site]['rt60']
-    dims = SACRED_SITES[site]['dims']
-    geometry = SACRED_SITES[site]['geometry']
-    fs = 44100
-    tone_data = generate_binaural_isochronic_tone(fs=fs, rt60=rt60, dims=dims, pulse=pulse)
-    return jsonify({
-        "site": site,
-        "rt60": rt60,
-        "dimensions": dims,
-        "geometry": geometry,
-        "tone_data": tone_data[:44100]  # ~1s, stereo (left, right)
+    # ---------------- utils ----------------
+    C_SOUND = 343.0  # m/s
+    STD_BANDS = [125, 250, 500, 1000, 2000, 4000]  # default bands
+
+    def np_to_native(x):
+        if isinstance(x, np.ndarray):
+            return x.tolist()
+        if isinstance(x, (np.floating, np.integer)):
+            return x.item()
+        if isinstance(x, dict):
+            return {k: np_to_native(v) for k, v in x.items()}
+        if isinstance(x, (list, tuple)):
+            return [np_to_native(v) for v in x]
+        return x
+
+    def room_volume(dims):
+        L, W, H = dims
+        return float(L*W*H)
+
+    def room_surface(dims):
+        L, W, H = dims
+        return float(2*(L*W + L*H + W*H))
+
+    def avg_absorption_from_rt60(rt60, V, S):
+        # Sabine: T = 0.161 * V / (alpha_avg * S)  -> alpha_avg = 0.161 * V / (T * S)
+        # Clamp to sane range
+        if rt60 <= 0 or S <= 0:
+            return 0.2
+        a = 0.161 * V / (rt60 * S)
+        return float(min(max(a, 0.02), 0.9))
+
+    def rt60_tilt_by_band(base_rt, bands):
+        # Mild high-frequency rolloff to reflect higher absorption at HF.
+        # T_band = base_rt * (f/500 Hz)^(-0.18)
+        out = {}
+        for f in bands:
+            tilt = -0.18 * math.log10(max(f, 125)/500.0)
+            out[str(int(f))] = float(max(0.2, base_rt + tilt))
+        return out
+
+    def nearest_band_rt60(rt60_by_band, f_hz):
+        # Map any frequency to nearest standard band RT60
+        bands = [int(b) for b in rt60_by_band.keys()]
+        b = min(bands, key=lambda x: abs(x - f_hz))
+        return float(rt60_by_band[str(b)])
+
+    def schroeder_frequency(rt60, V):
+        # fs ≈ 2000 * sqrt(RT60 / V)
+        if V <= 0 or rt60 <= 0:
+            return None
+        return 2000.0 * math.sqrt(rt60 / V)
+
+    def modal_type(nx, ny, nz):
+        npos = (nx > 0) + (ny > 0) + (nz > 0)
+        return "axial" if npos == 1 else ("tangential" if npos == 2 else "oblique")
+
+    def modal_list(dims, fmax=2000.0, top_n=24, rt60_by_band=None):
+        Lx, Ly, Lz = dims
+        modes = []
+        # generate small index grid that covers up to fmax
+        for nx in range(0, 12):
+            for ny in range(0, 12):
+                for nz in range(0, 12):
+                    if nx == ny == nz == 0:
+                        continue
+                    # frequency
+                    f = (C_SOUND/2.0) * math.sqrt(
+                        (nx/max(Lx, 1e-6))**2 +
+                        (ny/max(Ly, 1e-6))**2 +
+                        (nz/max(Lz, 1e-6))**2
+                    )
+                    if f <= fmax:
+                        T_here = nearest_band_rt60(rt60_by_band, f) if rt60_by_band else 3.0
+                        # Mode bandwidth from decay time: tau = RT60/13.8155, B ≈ 1/(pi*tau) = 13.8155/(pi*RT60)
+                        B = 13.815510558 / (math.pi * max(T_here, 1e-6))  # Hz
+                        # Relative peak energy ~ 1/B (narrower = stronger) but also mild 1/f rolloff
+                        peak_e = (1.0 / max(B, 1e-6)) * (1.0 / max(f, 50.0))
+                        modes.append({
+                            "freq_hz": f,
+                            "nx": nx, "ny": ny, "nz": nz,
+                            "type": modal_type(nx, ny, nz),
+                            "bandwidth_hz": B,
+                            # Gaussian spread sigma ~ B/2.355 (FWHM to sigma) for smooth energy envelope
+                            "gauss_sigma_hz": B / 2.355,
+                            "rel_energy": peak_e
+                        })
+        # sort by frequency then pick top_n by a balanced score (low f more salient)
+        modes.sort(key=lambda m: (m["freq_hz"], -m["rel_energy"]))
+        # Normalize energy
+        sel = modes[:top_n]
+        esum = sum(m["rel_energy"] for m in sel) or 1.0
+        for m in sel:
+            m["rel_energy"] = float(m["rel_energy"] / esum)
+            m["freq_hz"] = float(m["freq_hz"])
+            m["bandwidth_hz"] = float(m["bandwidth_hz"])
+            m["gauss_sigma_hz"] = float(m["gauss_sigma_hz"])
+        return sel
+
+    def early_reflections(dims, alpha_avg, n=6):
+        # Source and listener near center; first-order images along axes
+        L, W, H = dims
+        paths = [
+            0.0,     # direct
+            2*L, 2*W, 2*H,   # first order bounces
+            # include two diagonals for richness but still sparse
+            2*math.sqrt(L*L + W*W),
+            2*math.sqrt(L*L + H*H),
+        ][: max(1, n)]
+        taps = []
+        for d in paths:
+            t_ms = (d / C_SOUND) * 1000.0
+            # energy falloff: inverse square + wall reflectance for bounces
+            if d == 0.0:
+                e = 1.0
+            else:
+                bounces = 1 if d in (2*L, 2*W, 2*H) else 2
+                reflectance = (1.0 - alpha_avg) ** bounces
+                e = reflectance / max((d**2), 1e-6)
+            taps.append([float(t_ms), float(e)])
+        # normalize energies
+        total = sum(e for _, e in taps) or 1.0
+        taps = [[t, e/total] for t, e in taps]
+        return taps
+
+    # --------------- handler ---------------
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        site = data.get("site")
+        if not site:
+            return jsonify({"error": "Missing 'site'"}), 400
+        site = site.replace("’", "'")  # normalize smart quotes
+        if site not in SACRED_SITES:
+            return jsonify({"error": f"Site '{site}' not found"}), 404
+
+        # request knobs
+        bands = data.get("bands", STD_BANDS)
+        fmax = float(data.get("fmax_hz", 2000.0))
+        top_n = int(data.get("modes_top_n", 24))
+        # cap any implied IR tail to 1–3 s for realism reference
+        tail_cap_s = float(min(3.0, max(1.0, SACRED_SITES[site].get("rt60", 3.0))))
+
+        info = SACRED_SITES[site]
+        dims = [float(x) for x in info.get("dims", [10.0, 10.0, 10.0])]
+        V = room_volume(dims)
+        S = room_surface(dims)
+        base_rt = float(info.get("rt60", 3.0))
+        rt60_by_band = rt60_tilt_by_band(base_rt, bands)
+        alpha_avg = avg_absorption_from_rt60(base_rt, V, S)
+        fs = schroeder_frequency(base_rt, V)
+
+        modes = modal_list(dims, fmax=fmax, top_n=top_n, rt60_by_band=rt60_by_band)
+        taps = early_reflections(dims, alpha_avg, n=6)
+
+        payload = {
+            "site": site,
+            "dims_m": dims,
+            "volume_m3": V,
+            "surface_area_m2": S,
+            "absorption_avg": alpha_avg,       # inferred from base RT60 by Sabine
+            "rt60_s_by_band": rt60_by_band,    # with HF tilt
+            "schroeder_freq_hz": fs,
+            "modal_summary": modes,            # each with freq, nx,ny,nz, type, bandwidth, sigma, rel_energy
+            "early_reflection_taps": taps,     # [time_ms, rel_energy], normalized
+            "ir_tail_sec_reference": tail_cap_s,
+            "method": "simulation_only_shoebox_analytics",
+            "notes": info.get("geometry", "")
+        }
+        return jsonify(np_to_native(payload)), 200
+
+    except Exception as e:
+        return jsonify({"error": "simulation failed", "detail": str(e)}), 500
     })
 
 if __name__ == '__main__':
