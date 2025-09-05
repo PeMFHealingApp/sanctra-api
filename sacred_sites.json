@@ -520,15 +520,29 @@
     },
     {
       "region": "China",
-      "site": "Temple of Heaven (Hall of Prayer, Echo Wall) — Beijing",
+      "site": "Temple of Heaven (Echo Wall) — Beijing",
       "status": "Modeled/Simulated",
-      "rt60": 5.0,
-      "dims": [38.0, 38.0, 38.0],
-      "geometry": "Circle (heaven); 3 tiers, ratios 9:3:1 (sacred 9).",
+      "rt60": 2.0,  // Adjusted lower for a thinner, more open wall structure
+      "dims": [38.0, 5.0, 5.0],  // Approximated as a wall with reduced height and width
+      "geometry": "Circular wall with focused acoustic reflections.",
       "sim_method": "Focused reflections.",
       "sources": "Echo wall.",
-      "description": "A circular temple with an echo wall, used for imperial prayers.",
-      "why_sacred": "Held sacred as a site for heavenly communication by emperors.",
+      "description": "A circular wall designed to create unique echo effects for visitors.",
+      "why_sacred": "Sacred for its acoustic properties enhancing spiritual reflection.",
+      "who_for": "Acousticians, tourists, and those seeking auditory experiences.",
+      "health_benefits": "May enhance hearing acuity, reduce tension, and improve concentration."
+    },
+     {
+      "region": "China",
+      "site": "Temple of Heaven (Hall of Prayer) — Beijing",
+      "status": "Modeled/Simulated",
+      "rt60": 5.0,  // Retained from original as it fits a larger enclosed space
+      "dims": [38.0, 38.0, 38.0],  // Original cubic approximation for the hall
+      "geometry": "Circular hall with 3 tiers, ratios 9:3:1 (sacred 9).",
+      "sim_method": "Focused reflections.",
+      "sources": "Imperial prayers.",
+      "description": "A grand circular hall used for imperial prayers, featuring a high ceiling and tiered design.",
+      "why_sacred": "Held sacred as the primary site for heavenly communication by emperors.",
       "who_for": "Historians, meditators, and those seeking divine connection.",
       "health_benefits": "May improve focus, support hearing, and reduce stress."
     },
