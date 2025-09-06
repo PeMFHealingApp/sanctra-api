@@ -1,4 +1,5 @@
 from flask import Flask, jsonify, request, url_for
+from flask_cors import CORS
 import unicodedata
 import os
 import json
@@ -6,18 +7,8 @@ import math
 
 app = Flask(__name__)
 
-from flask_cors import CORS
+CORS(app, resources={r"/*": {"origins": "*"}})
 
-# Allow your GitHub Pages app + local dev to call the API
-CORS(
-    app,
-    resources={r"/*": {"origins": [
-        "https://pemfhealingapp.github.io",
-        "http://localhost:8080",
-        "http://127.0.0.1:8080"
-    ]}},
-    supports_credentials=False
-)
 
 
 
