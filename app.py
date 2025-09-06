@@ -1,4 +1,5 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, url_for
+import unicodedata
 import os
 import json
 import math
@@ -11,8 +12,23 @@ app = Flask(__name__)
 LOCAL_JSON_PATH = os.path.join(os.path.dirname(__file__), "sacred_sites.json")
 
 # -----------------------------
+# Image manifest (served from /static/site-images)
+# -----------------------------
+MANIFEST_PATH = os.path.join(os.path.dirname(__file__), "static", "site-images", "manifest.json")
+
+def load_image_manifest():
+    try:
+        with open(MANIFEST_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+IMAGE_MANIFEST = load_image_manifest()
+
+# -----------------------------
 # Text normalization
 # -----------------------------
+
 def norm_text(s: str) -> str:
     if not isinstance(s, str):
         return s
@@ -27,9 +43,16 @@ def norm_text(s: str) -> str:
     )
     return " ".join(s.split())
 
+# also used for manifest lookups (case/quote-insensitive)
+
+def _norm_key(s: str) -> str:
+    # normalize unicode and unify quotes/spaces
+    return unicodedata.normalize("NFKC", (s or "").replace("’", "'").replace("‘", "'").strip()).lower()
+
 # -----------------------------
 # Numpy-safe JSON conversion
 # -----------------------------
+
 def np_to_native(x):
     if isinstance(x, (list, tuple)):
         return [np_to_native(i) for i in x]
@@ -63,6 +86,7 @@ def _parse_payload(data: dict):
         disclaimer = data.get("disclaimer", DEFAULT_DISCLAIMER)
     return sites_list, disclaimer
 
+
 def _build_maps(sites_list):
     sacred_sites = {}
     region_map = {}
@@ -80,6 +104,7 @@ def _build_maps(sites_list):
         region_map.setdefault(region_or_country, []).append(site_name)
 
     return sacred_sites, region_map
+
 
 def load_sacred_sites():
     try:
@@ -193,6 +218,29 @@ def early_reflections(dims, alpha_avg, n=6):
     return [[t, e / total] for t, e in taps]
 
 # -----------------------------
+# Image helpers
+# -----------------------------
+
+def image_filename_for_site(site_name: str) -> str | None:
+    """
+    Look up an image filename for a site:
+    1) exact key match in IMAGE_MANIFEST
+    2) normalized-title match against IMAGE_MANIFEST keys
+    """
+    if not site_name:
+        return None
+    # exact title match
+    entry = IMAGE_MANIFEST.get(site_name)
+    if isinstance(entry, dict) and entry.get("file"):
+        return entry["file"]
+    # normalized title match
+    nk = _norm_key(site_name)
+    for title, meta in IMAGE_MANIFEST.items():
+        if isinstance(meta, dict) and meta.get("file") and _norm_key(title) == nk:
+            return meta["file"]
+    return None
+
+# -----------------------------
 # Routes
 # -----------------------------
 @app.route("/")
@@ -207,6 +255,7 @@ def home():
             "/sites-by-country",
             "/sites-for-country?country=...",
             "/site-info?site=...",
+            "/site-image?site=...",
             "/generate-ir"
         ],
         "note": "POST /generate-ir returns compact JSON acoustic analytics.",
@@ -226,7 +275,10 @@ def health():
 def reload_cache():
     global SACRED_SITES, REGION_MAP, DISCLAIMER
     SACRED_SITES, REGION_MAP, DISCLAIMER = load_sacred_sites()
-    return jsonify({"reloaded": True, "sites": len(SACRED_SITES)}), 200
+    # also reload images in case new files were deployed
+    global IMAGE_MANIFEST
+    IMAGE_MANIFEST = load_image_manifest()
+    return jsonify({"reloaded": True, "sites": len(SACRED_SITES), "images": len(IMAGE_MANIFEST)}), 200
 
 @app.route("/sites", methods=["GET"])
 def get_sites():
@@ -267,8 +319,11 @@ def site_info():
     geometry_notes = info.get("geometry", info.get("sacred_geometry_notes", ""))
     sim_method = info.get("sim_method", info.get("simulation_method", ""))
 
+    display_name = info.get("site", site)
+    img_file = image_filename_for_site(display_name)
+
     info_out = {
-        "site": info.get("site", site),
+        "site": display_name,
         "region": info.get("region", info.get("country", "")),
         "status": info.get("status", ""),
         "rt60": info.get("rt60"),
@@ -280,9 +335,38 @@ def site_info():
         "health_benefits": info.get("health_benefits", ""),
         "sim_method": sim_method,
         "sources": info.get("sources", ""),
+        "image_url": (url_for("static", filename=f"site-images/{img_file}", _external=True) if img_file else None),
         "disclaimer": DISCLAIMER
     }
     return jsonify(np_to_native(info_out)), 200
+
+@app.route("/site-image", methods=["GET"])
+def site_image():
+    site = request.args.get("site", type=str)
+    if not site:
+        return jsonify({"error": "Missing 'site' query parameter"}), 400
+
+    # 1) Try to resolve directly from the manifest by title
+    filename = image_filename_for_site(site)
+
+    # 2) If not found, try via SACRED_SITES canonical display name
+    if not filename:
+        site_k = _norm_key(site)
+        if site_k in SACRED_SITES:
+            display_name = SACRED_SITES[site_k].get("site", site)
+            filename = image_filename_for_site(display_name)
+            site = display_name  # for the response
+
+    if filename:
+        return jsonify({
+            "site": site,
+            "image_url": url_for("static", filename=f"site-images/{filename}", _external=True)
+        }), 200
+
+    return jsonify({
+        "error": f"No image found for '{site}'",
+        "hint": "Check spelling or ensure it exists in static/site-images/manifest.json"
+    }), 404
 
 @app.route("/generate-ir", methods=["POST"])
 def generate_ir():
