@@ -8,14 +8,17 @@ app = Flask(__name__)
 
 from flask_cors import CORS
 
+# Allow your GitHub Pages app + local dev to call the API
 CORS(
     app,
     resources={r"/*": {"origins": [
         "https://pemfhealingapp.github.io",
-        "http://localhost:8080",   # keep for local testing
+        "http://localhost:8080",
+        "http://127.0.0.1:8080"
     ]}},
     supports_credentials=False
 )
+
 
 
 # -----------------------------
