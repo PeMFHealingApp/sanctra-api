@@ -6,6 +6,18 @@ import math
 
 app = Flask(__name__)
 
+from flask_cors import CORS
+
+CORS(
+    app,
+    resources={r"/*": {"origins": [
+        "https://pemfhealingapp.github.io",
+        "http://localhost:8080",   # keep for local testing
+    ]}},
+    supports_credentials=False
+)
+
+
 # -----------------------------
 # Local JSON path - single source of truth
 # -----------------------------
