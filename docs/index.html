@@ -2,87 +2,41 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
+  <title>Sanctra IR</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="robots" content="noindex,nofollow" />
-  <title>Sanctra IR</title>
+  <meta name="theme-color" content="#0b0b0b" />
 
-  <!-- Quicksand font -->
+  <!-- Font -->
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Quicksand:wght@400;600;700&display=swap" rel="stylesheet">
 
-  <!-- Favicons (keep these files in /docs) -->
+  <!-- Favicons -->
   <link rel="icon" href="./faviconV2.jpeg?v=2" type="image/jpeg">
   <link rel="apple-touch-icon" href="./faviconV2.jpeg?v=2" sizes="180x180">
-  <!-- Optional .ico fallback if you add it -->
   <link rel="icon" href="./favicon.ico?v=2" type="image/x-icon" sizes="any">
 
-  <meta name="theme-color" content="#0b0b0b" />
-
-  <!-- CSS (use the stylesheet you posted) -->
-  <link rel="stylesheet" href="./style.css?v=2025-09-07-8" />
-
-  <!-- ===== GoodBarber / iOS background-audio helpers ===== -->
-  <link rel="preload" as="audio" href="./silence.mp3">
-  <script>
-    (function () {
-      // URL for your silent track living in /docs
-      const SILENCE_URL = "./silence.mp3";
-
-      // Create a tiny hidden audio element that we can start after first user gesture
-      const a = document.createElement("audio");
-      a.src = SILENCE_URL;
-      a.loop = true;
-      a.preload = "auto";
-      a.playsInline = true;        // iOS inline/background
-      a.setAttribute("webkit-playsinline", "true");
-      a.style.display = "none";
-      document.addEventListener("DOMContentLoaded", () => document.body.appendChild(a));
-
-      // Kick the silent track on first user interaction (keeps iOS audio session alive)
-      let primed = false;
-      function prime() {
-        if (primed) return;
-        primed = true;
-        a.volume = 0.0001;
-        a.play().catch(() => { primed = false; });
-      }
-      ["touchstart","pointerdown","mousedown","keydown"].forEach(ev =>
-        window.addEventListener(ev, prime, { passive: true, once: true })
-      );
-
-      // Tell GoodBarber app (or any host webview) to stop its own audio when this SPA loads or starts playing
-      function gbStopAll() {
-        try { window.parent.postMessage({ type: "pemf_stop_all_audio" }, "*"); } catch {}
-        try { window.parent.postMessage("PEMF_STOP_ALL_AUDIO", "*"); } catch {}
-      }
-      window.GB_STOP_ALL = gbStopAll;
-      window.addEventListener("load", gbStopAll, { once: true });
-
-      // If host page sends us the same message, stop any <audio> elements in this SPA (fallback safety)
-      window.addEventListener("message", (e) => {
-        const t = e && e.data;
-        if (t === "PEMF_STOP_ALL_AUDIO" || (t && t.type === "pemf_stop_all_audio")) {
-          document.querySelectorAll("audio").forEach(el => { try { el.pause(); el.currentTime = 0; } catch {} });
-        }
-      });
-    })();
-  </script>
-  <!-- ===== end helpers ===== -->
+  <!-- Styles -->
+  <link rel="stylesheet" href="style.css?v=2025-09-07-9" />
 </head>
-
 <body>
+  <!-- Root -->
   <div id="root"></div>
 
-  <!-- React 18 UMD -->
+  <!-- Hidden audio used to keep iOS playing when screen sleeps -->
+  <audio id="bgpipe" playsinline preload="auto" style="display:none"></audio>
+
+  <!-- React libs -->
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
 
   <script>
+  // Stop any PEMF audio in the host app as soon as this SPA loads
+  try { window.parent.postMessage({ type:"pemf_stop_all_audio" }, "*"); } catch {}
+
   const { useEffect, useRef, useState } = React;
 
-  /* =========================
-     API BASE + ENDPOINTS
-     ========================= */
+  // ---------------- CONFIG ----------------
   const apiOverride = new URLSearchParams(location.search).get("api");
   const API_BASE = (apiOverride && /^https?:\/\//.test(apiOverride))
     ? apiOverride.replace(/\/+$/, "")
@@ -96,16 +50,14 @@
     genIR: API_BASE + "/generate-ir"
   };
 
-  /* =========================
-     UTILS / NORMALIZERS
-     ========================= */
-  async function safeJSON(res) {
+  // ---------------- UTIL ----------------
+  async function safeJSON(res){
     try { return await res.json(); }
     catch { try { return await res.text(); } catch { return null; } }
   }
   const clamp01 = v => Math.max(0, Math.min(1, Number(v)));
-  const pad = n => (n < 10 ? "0" + n : "" + n);
-  const fmtTime = s => { s = Math.max(0, Math.floor(s)); const m = Math.floor(s/60), r = s%60; return m + ":" + pad(r); };
+  const pad = n => n<10 ? "0"+n : ""+n;
+  const fmtTime = s => { s = Math.max(0, Math.floor(s)); const m = Math.floor(s/60), r = s%60; return m+":"+pad(r); };
 
   const toArray = (data, keys=[]) => {
     if (Array.isArray(data)) return data;
@@ -133,15 +85,15 @@
 
   const normalizeImage = raw => {
     if (!raw) return "";
-    if (typeof raw === "string") return (raw.startsWith("http:") && location.protocol==="https:") ? "https:" + raw.slice(5) : raw;
+    if (typeof raw === "string") return raw.startsWith("http:") && location.protocol==="https:" ? "https:" + raw.slice(5) : raw;
     if (Array.isArray(raw)) return normalizeImage(raw[0]);
     const c = raw.image_url || raw.url || raw.src || raw.href || raw.image || raw.result?.url || raw.data?.url || "";
     if (!c) return "";
-    return (c.startsWith("http:") && location.protocol==="https:") ? "https:" + c.slice(5) : c;
+    return c.startsWith("http:") && location.protocol==="https:" ? "https:" + c.slice(5) : c;
   };
 
   function pickByRegex(obj, re){
-    for (const [k,v] of Object.entries(obj||{})) {
+    for (const [k,v] of Object.entries(obj||{})){
       if (re.test(k) && typeof v === "string" && v.trim()) return v;
     }
     return "";
@@ -162,9 +114,7 @@
     };
   };
 
-  /* =========================
-     CUSTOM DROPDOWN
-     ========================= */
+  // ---------------- CUSTOM DROPDOWN ----------------
   function Dropdown({ value, options, onChange, busy }) {
     const [open, setOpen] = useState(false);
     const ref = useRef(null);
@@ -180,8 +130,7 @@
           React.createElement("span", { className:"arrow" })
         ),
         open && React.createElement("div", { className:"ddList", role:"listbox" },
-          busy ? React.createElement("div", { className:"ddLoading" },
-                   React.createElement("div",{className:"spinner"}), "Loading…")
+          busy ? React.createElement("div", { className:"ddLoading" }, React.createElement("div",{className:"spinner"}), "Loading…")
                : options.map(opt =>
                   React.createElement("div", {
                     key:String(opt),
@@ -196,9 +145,7 @@
     );
   }
 
-  /* =========================
-     AUDIO ENGINE (IR + program)
-     ========================= */
+  // ---------------- AUDIO ENGINE ----------------
   class IREngine {
     constructor(){
       this.context = null;
@@ -210,12 +157,17 @@
       this.onUpdate = () => {};
       this._raf = null;
       this.defaultProgram = { base_hz:200, binaural_split_hz:4, isotonic_rate_hz:0.25, pink_noise_gain:0.06 };
+
+      // iOS background support
+      this.pipeDest = null;
+      this.pipeEl = null;
     }
     async ensure(){
       if (!this.context){
         const AC = window.AudioContext || window.webkitAudioContext;
         this.context = new AC({ latencyHint:"playback" });
-        // Master gain with -1 dB ceiling into fast limiter
+
+        // Master chain with -1 dB ceiling
         this.master = this.context.createGain();
         const ceiling = 0.89125; // -1 dB linear
         this.master.gain.value = ceiling;
@@ -230,15 +182,33 @@
 
         this.master.connect(this.limiter).connect(this.context.destination);
 
+        // MediaStream pipe to hidden <audio> for iOS background
+        this.pipeDest = this.context.createMediaStreamDestination();
+        this.master.connect(this.pipeDest);
+        this.pipeEl = document.getElementById("bgpipe");
+
+        // Resume on focus
         document.addEventListener("visibilitychange", () => {
           if (document.visibilityState === "visible" && this.context.state !== "running") this.context.resume();
         }, { passive:true });
-
-        // Stop everything when leaving page
+        // Stop on page leave
         window.addEventListener("pagehide", ()=>this.stop(), { passive:true });
         window.addEventListener("beforeunload", ()=>this.stop(), { passive:true });
       }
       if (this.context.state === "suspended") await this.context.resume();
+    }
+    async attachPipe(){
+      // Attach and play the hidden element to keep iOS alive when screen sleeps
+      if (this.pipeEl && !this.pipeEl.srcObject) {
+        this.pipeEl.srcObject = this.pipeDest.stream;
+        try { await this.pipeEl.play(); } catch(e) {}
+      }
+    }
+    detachPipe(){
+      if (this.pipeEl) {
+        try { this.pipeEl.pause(); } catch(e){}
+        this.pipeEl.srcObject = null;
+      }
     }
     setVolume(v){
       if (this.master) this.master.gain.setTargetAtTime(0.89125 * clamp01(v), this.context.currentTime, 0.01);
@@ -249,6 +219,7 @@
         [oscL,oscR,mod,noiseSrc].forEach(n=>{ try{ n && n.stop(); }catch{} });
         modalBank && modalBank.forEach(m=>{ try{ m.src.stop(); }catch{} });
       }
+      this.detachPipe();
       this.nodes = null;
       cancelAnimationFrame(this._raf); this._raf=null;
     }
@@ -257,7 +228,6 @@
     async buildIRBuffer(irJson){
       await this.ensure();
       const ctx = this.context, sr = ctx.sampleRate;
-
       const taps = Array.isArray(irJson?.early_reflection_taps) ? irJson.early_reflection_taps
                   : Array.isArray(irJson?.taps) ? irJson.taps : [];
       const modes = Array.isArray(irJson?.modal_summary) ? irJson.modal_summary
@@ -339,14 +309,14 @@
         }
       }
 
-      // Fade & normalize with headroom (< -1 dB before limiter)
+      // Fade and normalize with headroom before limiter
       const fade = Math.min(Math.floor(len*0.12), Math.floor(sr*0.8));
       let peak = 0;
       for (let n=0;n<len;n++){
         if (n > len - fade){ const t = (n - (len - fade)) / fade; const w = 1 - t; L[n]*=w; R[n]*=w; }
         peak = Math.max(peak, Math.abs(L[n]), Math.abs(R[n]));
       }
-      const norm = peak>0 ? Math.min(0.88/peak, 2.0) : 1; // extra headroom
+      const norm = peak>0 ? Math.min(0.88/peak, 2.0) : 1;
       for (let n=0;n<len;n++){ L[n]*=norm; R[n]*=norm; }
       return buf;
     }
@@ -383,14 +353,12 @@
       const wet = ctx.createGain(); wet.gain.value = 1.0;
       const dry = ctx.createGain(); dry.gain.value = 0.0;
 
-      // binaural carriers
       const oscL = ctx.createOscillator(), oscR = ctx.createOscillator();
       oscL.type = "sine"; oscR.type = "sine";
       const base = Math.max(20, program.base_hz);
       const split = Math.max(0, program.binaural_split_hz);
       oscL.frequency.value = base - split/2; oscR.frequency.value = base + split/2;
 
-      // slow isotonic AM
       const mod = ctx.createOscillator(); mod.type = "sine"; mod.frequency.value = Math.max(0.05, program.isotonic_rate_hz);
       const modGL = ctx.createGain(); modGL.gain.value = 0.33;
       const modGR = ctx.createGain(); modGR.gain.value = 0.33;
@@ -399,13 +367,12 @@
       mod.connect(modGL); mod.connect(modGR); modGL.connect(ampL.gain); modGR.connect(ampR.gain);
       oscL.connect(ampL); oscR.connect(ampR);
 
-      // Pink noise bed
       const noise = this.makePink(ctx, 4.0);
       const noiseSrc = ctx.createBufferSource(); noiseSrc.buffer = noise; noiseSrc.loop = true;
       const nGain = ctx.createGain(); nGain.gain.value = Math.max(0, program.pink_noise_gain);
       noiseSrc.connect(nGain).connect(merger);
 
-      // Modal sparkles from IR modes
+      // Modal details from IR JSON
       const modal = [];
       const modes = Array.isArray(irJson?.modal_summary) ? irJson.modal_summary : [];
       modes.slice(0,48).forEach((m,i)=>{
@@ -433,15 +400,17 @@
       const { oscL, oscR, mod, noiseSrc, modalBank } = this.nodes;
       noiseSrc.start(); modalBank.forEach(m=>m.src.start());
       oscL.start(); oscR.start(); mod.start();
+
+      // Keep iOS alive in background
+      await this.attachPipe();
+
       this.startedAt = this.context.currentTime;
       const tick = () => { this.onUpdate(); this._raf = requestAnimationFrame(tick); };
       this._raf = requestAnimationFrame(tick);
     }
   }
 
-  /* =========================
-     APP
-     ========================= */
+  // ---------------- APP ----------------
   function App(){
     const [booting, setBooting] = useState(true);
     const [countries, setCountries] = useState([]);
@@ -465,10 +434,10 @@
     const totalTime = minutes * 60;
     const irRef = useRef(null);
 
-    // stop any GoodBarber audio on load
-    useEffect(()=>{ try { window.GB_STOP_ALL && window.GB_STOP_ALL(); } catch {} }, []);
+    function stopOtherAppAudio(){ try{ window.parent.postMessage({ type:"pemf_stop_all_audio" }, "*"); }catch{} }
+    useEffect(()=>{ stopOtherAppAudio(); },[]); // stop GoodBarber audio on load
 
-    // Initial load with full-screen preloader
+    // Boot and default selections
     useEffect(()=>{
       let alive = true;
       const init = async ()=>{
@@ -477,24 +446,18 @@
           const cRes = await fetch(ENDPOINTS.countries);
           const cRaw = await safeJSON(cRes);
           let list = normalizeCountries(cRaw);
-          // Add All Sites and default
-          const deDuped = Array.from(new Set(list)).filter(Boolean);
-          // Make sure "Egypt" exists and is first default selection
-          const withDefault = deDuped.includes("Egypt") ? deDuped : ["Egypt", ...deDuped];
-          const cList = ["All Sites", ...withDefault];
-          setCountries(cList);
+          if (!list.includes("Egypt")) list = ["Egypt", ...list.filter(x=>x!=="Egypt")];
 
-          // Build an "all sites" index (union)
-          const siteLists = await Promise.all(withDefault.map(async c=>{
+          const siteLists = await Promise.all(list.map(async c=>{
             const r = await fetch(ENDPOINTS.sitesForCountry(c));
             const j = await safeJSON(r);
             return normalizeSites(j);
           }));
           const agg = [...new Set(siteLists.flat())].sort((a,b)=>a.localeCompare(b));
           if (!alive) return;
+          setCountries(["All Sites", ...list]);
           setAllSites(agg);
 
-          // Egypt default sites
           const egRes = await fetch(ENDPOINTS.sitesForCountry("Egypt"));
           const egRaw = await safeJSON(egRes);
           const egList = normalizeSites(egRaw);
@@ -507,7 +470,7 @@
       return ()=>{ alive=false; stopAll(true); };
     },[]);
 
-    // Respond to country change
+    // Country change
     useEffect(()=>{
       let alive=true;
       const run = async ()=>{
@@ -528,12 +491,12 @@
       return ()=>{ alive=false; };
     }, [country, allSites]);
 
-    // Stop audio whenever preset context changes
+    // Stop audio when context changes
     useEffect(()=>{ if (isPlaying) stopAll(false); }, [country]);
     useEffect(()=>{ if (isPlaying) stopAll(false); }, [site]);
     useEffect(()=>{ if (isPlaying) stopAll(false); }, [minutes]);
 
-    // Load site info + image
+    // Load site info and image
     useEffect(()=>{
       let alive=true;
       const load = async ()=>{
@@ -545,7 +508,8 @@
           const pRaw = await safeJSON(pRes);
           if (!alive) return;
           setInfo(normalizeInfo(iRaw));
-          setImg(normalizeImage(pRaw) || "");
+          const url = normalizeImage(pRaw) || "";
+          setImg(url);
         } catch(e){ console.error(e); if (!alive) return; setInfo(null); setImg(""); setImgBroken(true); }
         finally{ if (alive) setLoading(false); }
       };
@@ -572,7 +536,7 @@
 
     async function play(sendStop=true){
       if (!site) return;
-      if (sendStop) { try { window.GB_STOP_ALL && window.GB_STOP_ALL(); } catch {} }
+      if (sendStop) stopOtherAppAudio();
       setPlayerOpen(true); setError("");
       try{
         setLoading(true);
@@ -597,6 +561,18 @@
         await eg.loadAndStart(json || {}, hints);
         eg.startedAt = eg.context.currentTime;
         setIsPlaying(true);
+
+        // Lock screen controls
+        if ("mediaSession" in navigator) {
+          navigator.mediaSession.metadata = new MediaMetadata({
+            title: site || "Sanctra IR",
+            artist: "PeMFHealing.app",
+            artwork: img ? [{ src: img, sizes: "512x512", type: "image/jpeg" }] : []
+          });
+          navigator.mediaSession.setActionHandler("play", () => play(false));
+          navigator.mediaSession.setActionHandler("pause", () => pause(false));
+          navigator.mediaSession.setActionHandler("stop", () => pause(true));
+        }
       } catch(e){ console.error(e); setError("IR synthesis failed."); }
       finally{ setLoading(false); }
     }
@@ -618,11 +594,10 @@
 
     const minuteOptions = [15, 36, 45];
 
-    /* ---------- UI ---------- */
     return (
       React.createElement(React.Fragment, null,
 
-        /* Preloader */
+        /* Boot overlay */
         booting && React.createElement("div", { className:"boot" },
           React.createElement("div", { className:"bootInner" },
             React.createElement("div", { className:"spinner big" }),
@@ -632,13 +607,13 @@
 
         React.createElement("main", { className:"container" },
 
-          /* Top dropdowns (no labels) */
+          /* Two dropdowns. No labels to save space as requested */
           React.createElement("div", { className:"dropdowns" },
             React.createElement(Dropdown, { value:country, options:countries, onChange:setCountry, busy:loading && !countries.length }),
             React.createElement(Dropdown, { value:site, options:sites, onChange:setSite, busy:loading && !sites.length })
           ),
 
-          /* Card with image + overlay play/pause (white glyphs) */
+          /* Card */
           React.createElement("div", { className:"card" },
             React.createElement("div", { className:"hero" },
               img && !imgBroken
@@ -652,7 +627,6 @@
               }, React.createElement("span", { className:"glyph" }))
             ),
 
-            /* Minute selector + fetch spinner */
             React.createElement("div", { className:"controlsRow" },
               React.createElement("div", { className:"seg" },
                 minuteOptions.map(min =>
@@ -664,7 +638,11 @@
               loading ? React.createElement("div", { className:"loading small" }, React.createElement("div",{className:"spinner"}),"Fetching…") : null
             ),
 
-            /* Site sections */
+            React.createElement("div", { className:"section" },
+              React.createElement("h3", null, "Country"),
+              React.createElement("p", null, country || "")
+            ),
+
             React.createElement("div", { className:"section" },
               React.createElement("h3", null, "Site Information"),
               info ? React.createElement("p", null, info?.description || "-")
@@ -687,10 +665,9 @@
               React.createElement("p", null, info.who_is_this_for)
             ),
 
-            /* Fine-print disclaimer (not gold) */
             React.createElement("div", { className:"section" },
               React.createElement("p", { className:"fineprint" },
-                "Disclaimer: For educational use only. Not medical advice. Consult a qualified professional."
+                "Disclaimer: For education only. Not medical advice. Consult a qualified professional."
               )
             ),
 
@@ -700,7 +677,7 @@
           React.createElement("footer", { className:"footer" }, "Copyright® 2025 PeMFHealing.app")
         ),
 
-        /* Bottom player bar (close doesn’t stop) */
+        /* Bottom player */
         React.createElement("div", { className:"player " + (playerOpen ? "open":"") },
           React.createElement("div", { className:"playerInner" },
             React.createElement("div", { className:"playerRow" },
