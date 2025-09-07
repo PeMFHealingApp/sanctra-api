@@ -1,14 +1,26 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <meta name="robots" content="noindex,nofollow"/>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex,nofollow" />
   <title>Sanctra IR</title>
-  <link href="https://fonts.googleapis.com/css2?family=Quicksand:wght@400;600;700&display=swap" rel="stylesheet"/>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='28' fill='%23c9a44c'/%3E%3C/svg%3E"/>
-  <link rel="stylesheet" href="style.css?v=2025-09-07-6"/>
+
+  <!-- Quicksand -->
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Quicksand:wght@400;600;700&display=swap" rel="stylesheet">
+
+  <!-- Favicons -->
+  <link rel="icon" href="./faviconV2.jpeg?v=2" type="image/jpeg">
+  <link rel="apple-touch-icon" href="./faviconV2.jpeg?v=2" sizes="180x180">
+  <!-- Optional .ico fallback - place a copy named favicon.ico in /docs -->
+  <link rel="icon" href="./favicon.ico?v=2" type="image/x-icon" sizes="any">
+
+  <meta name="theme-color" content="#0b0b0b" />
+
+  <link rel="stylesheet" href="style.css?v=2025-09-07-7" />
 </head>
+
 <body>
   <div id="root"></div>
 
@@ -18,7 +30,7 @@
   <script>
   const { useEffect, useRef, useState } = React;
 
-  // ---------- CONFIG ----------
+  // ---------------- CONFIG ----------------
   const apiOverride = new URLSearchParams(location.search).get("api");
   const API_BASE = (apiOverride && /^https?:\/\//.test(apiOverride))
     ? apiOverride.replace(/\/+$/, "")
@@ -26,24 +38,25 @@
 
   const ENDPOINTS = {
     countries: API_BASE + "/countries",
-    sitesForCountry: (c) => API_BASE + "/sites-for-country?country=" + encodeURIComponent(c),
-    siteInfo: (s) => API_BASE + "/site-info?site=" + encodeURIComponent(s),
-    siteImage: (s) => API_BASE + "/site-image?site=" + encodeURIComponent(s),
+    sitesForCountry: c => API_BASE + "/sites-for-country?country=" + encodeURIComponent(c),
+    siteInfo: s => API_BASE + "/site-info?site=" + encodeURIComponent(s),
+    siteImage: s => API_BASE + "/site-image?site=" + encodeURIComponent(s),
     genIR: API_BASE + "/generate-ir"
   };
 
-  // ---------- UTIL ----------
-  async function safeJSON(res) {
-    try { return await res.json(); } catch { try { return await res.text(); } catch { return null; } }
+  // ---------------- UTIL ----------------
+  async function safeJSON(res){
+    try { return await res.json(); }
+    catch { try { return await res.text(); } catch { return null; } }
   }
   const clamp01 = v => Math.max(0, Math.min(1, Number(v)));
-  const pad = n => n < 10 ? "0"+n : ""+n;
-  const fmtTime = s => { s = Math.max(0, Math.floor(s)); const m = Math.floor(s/60), r = s % 60; return m + ":" + pad(r); };
+  const pad = n => n<10 ? "0"+n : ""+n;
+  const fmtTime = s => { s = Math.max(0, Math.floor(s)); const m = Math.floor(s/60), r = s%60; return m+":"+pad(r); };
 
-  const toArray = (data, preferred=[]) => {
+  const toArray = (data, keys=[]) => {
     if (Array.isArray(data)) return data;
     if (data && typeof data === "object") {
-      for (const k of preferred) if (Array.isArray(data[k])) return data[k];
+      for (const k of keys) if (Array.isArray(data[k])) return data[k];
       const any = Object.values(data).find(v => Array.isArray(v));
       if (any) return any;
     }
@@ -53,6 +66,7 @@
     }
     return [];
   };
+
   const normalizeCountries = raw =>
     toArray(raw, ["countries","items","data","list"])
       .map(x => typeof x === "string" ? x : (x?.name || x?.title || x?.country || ""))
@@ -81,12 +95,8 @@
   const normalizeInfo = raw => {
     const d = raw?.info && typeof raw.info === "object" ? raw.info : (raw || {});
     const desc = d.description || d.text || pickByRegex(d, /(overview|about|description)/i);
-    const why =
-      d.why_sacred || d.why || d.why_is_this_sacred || d.why_this_is_sacred ||
-      pickByRegex(d, /(why).*sacred/i);
-    const who =
-      d.who_is_this_for || d.who || d.audience || d.target_audience || d.for_whom ||
-      pickByRegex(d, /(who).*for|audience/i);
+    const why = d.why_sacred || d.why || d.why_is_this_sacred || d.why_this_is_sacred || pickByRegex(d, /(why).*sacred/i);
+    const who = d.who_is_this_for || d.who || d.audience || d.target_audience || d.for_whom || pickByRegex(d, /(who).*for|audience/i);
     const benefits = d.health_benefits || d.benefits || pickByRegex(d, /(benefit)/i);
     return {
       region: d.region || "",
@@ -98,23 +108,18 @@
     };
   };
 
-  // ---------- CUSTOM DROPDOWN ----------
+  // ---------------- CUSTOM DROPDOWN ----------------
   function Dropdown({ value, options, onChange, busy }) {
     const [open, setOpen] = useState(false);
     const ref = useRef(null);
-    useEffect(() => {
-      const onDoc = (e) => { if (!ref.current) return; if (!ref.current.contains(e.target)) setOpen(false); };
+    useEffect(()=>{
+      const onDoc = e => { if (!ref.current) return; if (!ref.current.contains(e.target)) setOpen(false); };
       document.addEventListener("click", onDoc);
       return () => document.removeEventListener("click", onDoc);
     },[]);
     return (
       React.createElement("div", { className:"dd", ref },
-        React.createElement("button", {
-          className:"ddBtn",
-          onClick:()=>setOpen(o=>!o),
-          "aria-expanded": open,
-          "aria-haspopup":"listbox"
-        },
+        React.createElement("button", { className:"ddBtn", onClick:()=>setOpen(o=>!o), "aria-expanded":open, "aria-haspopup":"listbox" },
           React.createElement("span", { className:"ddValue" }, value || "—"),
           React.createElement("span", { className:"arrow" })
         ),
@@ -124,8 +129,8 @@
                   React.createElement("div", {
                     key:String(opt),
                     role:"option",
-                    "aria-selected": String(opt) === String(value),
-                    className:"ddItem" + (String(opt)===String(value) ? " sel" : ""),
+                    "aria-selected": String(opt)===String(value),
+                    className:"ddItem"+(String(opt)===String(value)?" sel":""),
                     onClick:()=>{ onChange(String(opt)); setOpen(false); }
                   }, String(opt))
                 )
@@ -134,12 +139,12 @@
     );
   }
 
-  // ---------- AUDIO ENGINE ----------
+  // ---------------- AUDIO ENGINE ----------------
   class IREngine {
-    constructor() {
+    constructor(){
       this.context = null;
       this.master = null;
-      this.comp = null;
+      this.limiter = null;
       this.nodes = null;
       this.loop = false;
       this.startedAt = 0;
@@ -147,24 +152,40 @@
       this._raf = null;
       this.defaultProgram = { base_hz:200, binaural_split_hz:4, isotonic_rate_hz:0.25, pink_noise_gain:0.06 };
     }
-    async ensure() {
-      if (!this.context) {
+    async ensure(){
+      if (!this.context){
         const AC = window.AudioContext || window.webkitAudioContext;
-        this.context = new AC({ latencyHint: "playback" });
-        this.master = this.context.createGain(); this.master.gain.value = 0.85;
-        this.comp = this.context.createDynamicsCompressor();
-        this.comp.threshold.value = -10; this.comp.knee.value = 18; this.comp.ratio.value = 3;
-        this.comp.attack.value = 0.003; this.comp.release.value = 0.25;
-        this.master.connect(this.comp).connect(this.context.destination);
+        this.context = new AC({ latencyHint:"playback" });
+        // Master gain into brickwall-like limiter, then destination
+        this.master = this.context.createGain();
+        // ceiling -1 dB => linear 0.89125
+        const ceiling = 0.89125;
+        this.master.gain.value = ceiling; // slider will scale below this
+        const comp = this.context.createDynamicsCompressor();
+        comp.threshold.value = -3;
+        comp.knee.value = 0.1;
+        comp.ratio.value = 20;
+        comp.attack.value = 0.002;
+        comp.release.value = 0.10;
+        this.limiter = comp;
+        this.master.connect(this.limiter).connect(this.context.destination);
+
+        // Resume on focus
         document.addEventListener("visibilitychange", () => {
           if (document.visibilityState === "visible" && this.context.state !== "running") this.context.resume();
         }, { passive:true });
+        // Stop on page leave
+        window.addEventListener("pagehide", ()=>this.stop(), { passive:true });
+        window.addEventListener("beforeunload", ()=>this.stop(), { passive:true });
       }
       if (this.context.state === "suspended") await this.context.resume();
     }
-    setVolume(v){ if (this.master) this.master.gain.setTargetAtTime(v, this.context.currentTime, 0.01); }
+    setVolume(v){
+      // map 0..1 -> 0..1 relative to the -1 dB ceiling already on master
+      if (this.master) this.master.gain.setTargetAtTime(0.89125 * clamp01(v), this.context.currentTime, 0.01);
+    }
     stop(){
-      if (this.nodes) {
+      if (this.nodes){
         const { oscL, oscR, mod, noiseSrc, modalBank } = this.nodes;
         [oscL,oscR,mod,noiseSrc].forEach(n=>{ try{ n && n.stop(); }catch{} });
         modalBank && modalBank.forEach(m=>{ try{ m.src.stop(); }catch{} });
@@ -258,14 +279,14 @@
         }
       }
 
-      // Fade & normalize
+      // Fade & normalize with headroom
       const fade = Math.min(Math.floor(len*0.12), Math.floor(sr*0.8));
       let peak = 0;
       for (let n=0;n<len;n++){
         if (n > len - fade){ const t = (n - (len - fade)) / fade; const w = 1 - t; L[n]*=w; R[n]*=w; }
         peak = Math.max(peak, Math.abs(L[n]), Math.abs(R[n]));
       }
-      const norm = peak>0 ? Math.min(0.92/peak, 2.0) : 1;
+      const norm = peak>0 ? Math.min(0.88/peak, 2.0) : 1; // ensure headroom before limiter
       for (let n=0;n<len;n++){ L[n]*=norm; R[n]*=norm; }
       return buf;
     }
@@ -321,7 +342,7 @@
       const nGain = ctx.createGain(); nGain.gain.value = Math.max(0, program.pink_noise_gain);
       noiseSrc.connect(nGain).connect(merger);
 
-      // Modal sprinkles
+      // Modal sparkles
       const modal = [];
       const modes = Array.isArray(irJson?.modal_summary) ? irJson.modal_summary : [];
       modes.slice(0,48).forEach((m,i)=>{
@@ -355,8 +376,9 @@
     }
   }
 
-  // ---------- APP ----------
+  // ---------------- APP ----------------
   function App(){
+    const [booting, setBooting] = useState(true);
     const [countries, setCountries] = useState([]);
     const [allSites, setAllSites] = useState([]);
     const [country, setCountry] = useState("Egypt");
@@ -378,10 +400,13 @@
     const totalTime = minutes * 60;
     const irRef = useRef(null);
 
-    // init countries + aggregate "All Sites"
+    function stopOtherAppAudio(){ try{ window.parent.postMessage({ type:"pemf_stop_all_audio" }, "*"); }catch{} }
+    useEffect(()=>{ stopOtherAppAudio(); },[]); // stop any mp3 stream on load
+
+    // Initial load with full-screen preloader
     useEffect(()=>{
       let alive = true;
-      const init = async () => {
+      const init = async ()=>{
         try{
           setLoading(true);
           const cRes = await fetch(ENDPOINTS.countries);
@@ -404,14 +429,14 @@
           const egList = normalizeSites(egRaw);
           const preferred = egList.find(s=>/king'?s?\s+chamber/i.test(s)) || egList[0] || "";
           setSites(egList); setSite(preferred);
-        } catch(e){ console.error(e); if (!alive) return; setError("Unable to load countries or sites."); }
-        finally { if (alive) setLoading(false); }
+        } catch(e){ console.error(e); if (alive) setError("Unable to load initial data."); }
+        finally { if (alive){ setLoading(false); setTimeout(()=>setBooting(false), 300); } }
       };
       init();
       return ()=>{ alive=false; stopAll(true); };
     },[]);
 
-    // per-country sites
+    // Respond to country change
     useEffect(()=>{
       let alive=true;
       const run = async ()=>{
@@ -425,14 +450,19 @@
             const sl = normalizeSites(j);
             setSites(sl); setSite(sl[0] || "");
           }
-        } catch(e){ console.error(e); if (!alive) return; setError("Failed to load sites."); }
+        } catch(e){ console.error(e); if (alive) setError("Failed to load sites."); }
         finally{ if (alive) setLoading(false); }
       };
       if (allSites.length || country!=="All Sites") run();
       return ()=>{ alive=false; };
     }, [country, allSites]);
 
-    // info + image
+    // Stop audio whenever preset context changes (country, site, minutes)
+    useEffect(()=>{ if (isPlaying) stopAll(false); }, [country]);
+    useEffect(()=>{ if (isPlaying) stopAll(false); }, [site]);
+    useEffect(()=>{ if (isPlaying) stopAll(false); }, [minutes]);
+
+    // Load site info + image
     useEffect(()=>{
       let alive=true;
       const load = async ()=>{
@@ -446,17 +476,12 @@
           setInfo(normalizeInfo(iRaw));
           const url = normalizeImage(pRaw) || "";
           setImg(url);
-        } catch(e){
-          console.error(e);
-          if (!alive) return;
-          setInfo(null); setImg(""); setImgBroken(true);
-        } finally { if (alive) setLoading(false); }
+        } catch(e){ console.error(e); if (!alive) return; setInfo(null); setImg(""); setImgBroken(true); }
+        finally{ if (alive) setLoading(false); }
       };
       load();
       return ()=>{ alive=false; };
     }, [site]);
-
-    function stopOtherAppAudio(){ try{ window.parent.postMessage({type:"pemf_stop_all_audio"}, "*"); }catch{} }
 
     function stopAll(collapse=false){
       if (irRef.current){ irRef.current.stop(); irRef.current = null; }
@@ -468,15 +493,9 @@
       const eg = irRef.current; if (!eg || !eg.context) return;
       const t = Math.max(0, eg.context.currentTime - eg.startedAt);
       if (t >= totalTime){
-        if (eg.loop){
-          // loop seamlessly without rebuilding graph
-          eg.startedAt = eg.context.currentTime;
-          setCurrentTime(0);
-          return;
-        } else {
-          pause();
-          return;
-        }
+        if (eg.loop){ eg.startedAt = eg.context.currentTime; setCurrentTime(0); return; }
+        pause();
+        return;
       }
       setCurrentTime(t);
     }
@@ -511,6 +530,7 @@
       } catch(e){ console.error(e); setError("IR synthesis failed."); }
       finally{ setLoading(false); }
     }
+
     function pause(collapse=false){ stopAll(collapse); }
     function seek(v){
       const t = Number(v);
@@ -530,21 +550,19 @@
 
     return (
       React.createElement(React.Fragment, null,
+
+        booting && React.createElement("div", { className:"boot" },
+          React.createElement("div", { className:"bootInner" },
+            React.createElement("div", { className:"spinner big" }),
+            React.createElement("div", { className:"bootText" }, "Loading sanctra presets…")
+          )
+        ),
+
         React.createElement("main", { className:"container" },
 
           React.createElement("div", { className:"dropdowns" },
-            React.createElement(Dropdown, {
-              value:country,
-              options:countries,
-              onChange:setCountry,
-              busy:loading && !countries.length
-            }),
-            React.createElement(Dropdown, {
-              value:site,
-              options:sites,
-              onChange:setSite,
-              busy:loading && !sites.length
-            })
+            React.createElement(Dropdown, { value:country, options:countries, onChange:setCountry, busy:loading && !countries.length }),
+            React.createElement(Dropdown, { value:site, options:sites, onChange:setSite, busy:loading && !sites.length })
           ),
 
           React.createElement("div", { className:"card" },
@@ -621,7 +639,8 @@
               React.createElement("button", { className:"iconBtn " + (loop?"active":""), onClick:setLooping, title:"Loop" }, "∞"),
               React.createElement("input", { className:"vol", type:"range", min:"0", max:"1", step:"0.01", value:volume, onChange:e=>setVol(e.target.value), title:"Volume", "aria-label":"Volume" }),
               React.createElement("div", { className:"pushRight" }),
-              React.createElement("button", { className:"iconBtn closeBtn", onClick:()=>pause(true), title:"Close" }, "✕")
+              /* close hides bar but keeps audio playing */
+              React.createElement("button", { className:"iconBtn closeBtn", onClick:()=>setPlayerOpen(false), title:"Close" }, "✕")
             ),
             React.createElement("div", { className:"bar" },
               React.createElement("input", { className:"progress", type:"range", min:"0", max:String(totalTime), step:"1", value:String(Math.min(currentTime,totalTime)), onChange:e=>seek(e.target.value) }),
