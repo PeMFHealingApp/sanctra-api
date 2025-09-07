@@ -6,17 +6,17 @@
   <meta name="robots" content="noindex,nofollow"/>
   <title>Sanctra IR</title>
   <link href="https://fonts.googleapis.com/css2?family=Quicksand:wght@400;600;700&display=swap" rel="stylesheet"/>
-  <link rel="stylesheet" href="style.css?v=2025-09-07-5"/>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='28' fill='%23c9a44c'/%3E%3C/svg%3E"/>
+  <link rel="stylesheet" href="style.css?v=2025-09-07-6"/>
 </head>
 <body>
   <div id="root"></div>
 
-  <!-- React -->
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
 
   <script>
-  const { useEffect, useRef, useState, useMemo } = React;
+  const { useEffect, useRef, useState } = React;
 
   // ---------- CONFIG ----------
   const apiOverride = new URLSearchParams(location.search).get("api");
@@ -72,20 +72,34 @@
     return c.startsWith("http:") && location.protocol==="https:" ? "https:" + c.slice(5) : c;
   };
 
+  function pickByRegex(obj, re){
+    for (const [k,v] of Object.entries(obj||{})){
+      if (re.test(k) && typeof v === "string" && v.trim()) return v;
+    }
+    return "";
+  }
   const normalizeInfo = raw => {
     const d = raw?.info && typeof raw.info === "object" ? raw.info : (raw || {});
+    const desc = d.description || d.text || pickByRegex(d, /(overview|about|description)/i);
+    const why =
+      d.why_sacred || d.why || d.why_is_this_sacred || d.why_this_is_sacred ||
+      pickByRegex(d, /(why).*sacred/i);
+    const who =
+      d.who_is_this_for || d.who || d.audience || d.target_audience || d.for_whom ||
+      pickByRegex(d, /(who).*for|audience/i);
+    const benefits = d.health_benefits || d.benefits || pickByRegex(d, /(benefit)/i);
     return {
       region: d.region || "",
-      description: d.description || d.text || "",
-      why_sacred: d.why_sacred || d.why || "",
-      health_benefits: d.health_benefits || d.benefits || "",
-      who_is_this_for: d.who_is_this_for || d.who || d.audience || "",
+      description: desc || "",
+      why_sacred: why || "",
+      health_benefits: benefits || "",
+      who_is_this_for: who || "",
       disclaimer: d.disclaimer || ""
     };
   };
 
   // ---------- CUSTOM DROPDOWN ----------
-  function Dropdown({ label, value, options, onChange, busy }) {
+  function Dropdown({ value, options, onChange, busy }) {
     const [open, setOpen] = useState(false);
     const ref = useRef(null);
     useEffect(() => {
@@ -101,7 +115,6 @@
           "aria-expanded": open,
           "aria-haspopup":"listbox"
         },
-          React.createElement("span", { className:"ddLabel" }, label),
           React.createElement("span", { className:"ddValue" }, value || "—"),
           React.createElement("span", { className:"arrow" })
         ),
@@ -132,30 +145,17 @@
       this.startedAt = 0;
       this.onUpdate = () => {};
       this._raf = null;
-      this.defaultProgram = {
-        base_hz: 200,
-        binaural_split_hz: 4,
-        isotonic_rate_hz: 0.25,
-        pink_noise_gain: 0.06
-      };
+      this.defaultProgram = { base_hz:200, binaural_split_hz:4, isotonic_rate_hz:0.25, pink_noise_gain:0.06 };
     }
     async ensure() {
       if (!this.context) {
         const AC = window.AudioContext || window.webkitAudioContext;
         this.context = new AC({ latencyHint: "playback" });
-        // master + gentle compressor to keep below 0 dBFS
-        this.master = this.context.createGain();
-        this.master.gain.value = 0.85;
-
+        this.master = this.context.createGain(); this.master.gain.value = 0.85;
         this.comp = this.context.createDynamicsCompressor();
-        this.comp.threshold.value = -10; // dB
-        this.comp.knee.value = 18;
-        this.comp.ratio.value = 3;
-        this.comp.attack.value = 0.003;
-        this.comp.release.value = 0.25;
-
+        this.comp.threshold.value = -10; this.comp.knee.value = 18; this.comp.ratio.value = 3;
+        this.comp.attack.value = 0.003; this.comp.release.value = 0.25;
         this.master.connect(this.comp).connect(this.context.destination);
-
         document.addEventListener("visibilitychange", () => {
           if (document.visibilityState === "visible" && this.context.state !== "running") this.context.resume();
         }, { passive:true });
@@ -230,6 +230,7 @@
       const itdl = Math.floor(0.0006 * sr) * stereoWidth;
       const lpAlpha = hfRolloffHz > 0 ? Math.exp(-(Math.PI*2) * hfRolloffHz / sr) : 0;
 
+      // Late modal tail
       modes.slice(0,256).forEach(m=>{
         const f = Math.max(25, Number(m.freq_hz ?? m.f ?? m.freq ?? 0));
         if (!isFinite(f) || f<=0) return;
@@ -248,7 +249,7 @@
         }
       });
 
-      // LFE soft bloom
+      // LFE bloom
       if (lfeGain>0){
         let al=0, ar=0; const k = 0.0005 * lfeGain;
         for (let n=0;n<len;n++){
@@ -320,7 +321,7 @@
       const nGain = ctx.createGain(); nGain.gain.value = Math.max(0, program.pink_noise_gain);
       noiseSrc.connect(nGain).connect(merger);
 
-      // Modal sprinkling
+      // Modal sprinkles
       const modal = [];
       const modes = Array.isArray(irJson?.modal_summary) ? irJson.modal_summary : [];
       modes.slice(0,48).forEach((m,i)=>{
@@ -358,7 +359,7 @@
   function App(){
     const [countries, setCountries] = useState([]);
     const [allSites, setAllSites] = useState([]);
-    const [country, setCountry] = useState("Egypt"); // default
+    const [country, setCountry] = useState("Egypt");
     const [sites, setSites] = useState([]);
     const [site, setSite] = useState("");
     const [info, setInfo] = useState(null);
@@ -377,7 +378,7 @@
     const totalTime = minutes * 60;
     const irRef = useRef(null);
 
-    // init countries + default Egypt + build All Sites
+    // init countries + aggregate "All Sites"
     useEffect(()=>{
       let alive = true;
       const init = async () => {
@@ -387,7 +388,7 @@
           const cRaw = await safeJSON(cRes);
           let list = normalizeCountries(cRaw);
           if (!list.includes("Egypt")) list = ["Egypt", ...list.filter(x=>x!=="Egypt")];
-          // Build all sites list
+
           const siteLists = await Promise.all(list.map(async c=>{
             const r = await fetch(ENDPOINTS.sitesForCountry(c));
             const j = await safeJSON(r);
@@ -398,27 +399,24 @@
           setCountries(["All Sites", ...list]);
           setAllSites(agg);
 
-          // default sites for Egypt
           const egRes = await fetch(ENDPOINTS.sitesForCountry("Egypt"));
           const egRaw = await safeJSON(egRes);
           const egList = normalizeSites(egRaw);
           const preferred = egList.find(s=>/king'?s?\s+chamber/i.test(s)) || egList[0] || "";
           setSites(egList); setSite(preferred);
-        } catch(e){
-          console.error(e); if (!alive) return;
-          setError("Unable to load countries or sites.");
-        } finally { if (alive) setLoading(false); }
+        } catch(e){ console.error(e); if (!alive) return; setError("Unable to load countries or sites."); }
+        finally { if (alive) setLoading(false); }
       };
       init();
       return ()=>{ alive=false; stopAll(true); };
     },[]);
 
-    // load per-country sites when country changes
+    // per-country sites
     useEffect(()=>{
       let alive=true;
       const run = async ()=>{
         try{
-          setLoading(true); setError("");
+          setLoading(true); setError(""); setImgBroken(false);
           if (country==="All Sites"){
             setSites(allSites); setSite(allSites[0] || "");
           } else {
@@ -434,7 +432,7 @@
       return ()=>{ alive=false; };
     }, [country, allSites]);
 
-    // site info + image
+    // info + image
     useEffect(()=>{
       let alive=true;
       const load = async ()=>{
@@ -446,9 +444,13 @@
           const pRaw = await safeJSON(pRes);
           if (!alive) return;
           setInfo(normalizeInfo(iRaw));
-          setImg(normalizeImage(pRaw) || "");
-        } catch(e){ console.error(e); if (!alive) return; setError("Failed to load site data."); }
-        finally{ if (alive) setLoading(false); }
+          const url = normalizeImage(pRaw) || "";
+          setImg(url);
+        } catch(e){
+          console.error(e);
+          if (!alive) return;
+          setInfo(null); setImg(""); setImgBroken(true);
+        } finally { if (alive) setLoading(false); }
       };
       load();
       return ()=>{ alive=false; };
@@ -465,11 +467,18 @@
     function tick(){
       const eg = irRef.current; if (!eg || !eg.context) return;
       const t = Math.max(0, eg.context.currentTime - eg.startedAt);
-      setCurrentTime(Math.min(totalTime, t));
       if (t >= totalTime){
-        if (eg.loop){ pause(false); play(false); }
-        else pause();
+        if (eg.loop){
+          // loop seamlessly without rebuilding graph
+          eg.startedAt = eg.context.currentTime;
+          setCurrentTime(0);
+          return;
+        } else {
+          pause();
+          return;
+        }
       }
+      setCurrentTime(t);
     }
 
     async function play(sendStop=true){
@@ -517,7 +526,6 @@
       const val = Number(v); setVolume(val); if (irRef.current) irRef.current.setVolume(val);
     }
 
-    // UI
     const minuteOptions = [15, 36, 45];
 
     return (
@@ -526,14 +534,12 @@
 
           React.createElement("div", { className:"dropdowns" },
             React.createElement(Dropdown, {
-              label:"Select Country",
               value:country,
               options:countries,
               onChange:setCountry,
               busy:loading && !countries.length
             }),
             React.createElement(Dropdown, {
-              label:"Select Sacred Site",
               value:site,
               options:sites,
               onChange:setSite,
@@ -572,7 +578,7 @@
 
             React.createElement("div", { className:"section" },
               React.createElement("h3", null, "Site Information"),
-              info ? React.createElement("p", null, info.description || "-")
+              info ? React.createElement("p", null, info?.description || "-")
                    : React.createElement("p", { className:"muted" }, "Loading…")
             ),
 
@@ -583,29 +589,25 @@
 
             React.createElement("div", { className:"section" },
               React.createElement("h3", null, "Site Benefits"),
-              info ? React.createElement("p", null, info.health_benefits || "-")
+              info ? React.createElement("p", null, info?.health_benefits || "-")
                    : React.createElement("p", { className:"muted" }, "Loading…")
             ),
 
-            React.createElement("div", { className:"section" },
+            info && info.who_is_this_for && React.createElement("div", { className:"section" },
               React.createElement("h3", null, "Who is this for"),
-              info ? React.createElement("p", null, info.who_is_this_for || "-")
-                   : React.createElement("p", { className:"muted" }, "Loading…")
+              React.createElement("p", null, info.who_is_this_for)
             ),
 
             React.createElement("div", { className:"section" },
-              React.createElement("h3", null, "Disclaimer"),
               React.createElement("p", { className:"fineprint" },
-                "Disclaimer: The information provided is for educational and exploratory purposes only and should not be considered medical advice. Consult a healthcare professional before using any healing practices."
+                "Disclaimer: For education only. Not medical advice. Consult a qualified professional."
               )
             ),
 
             error && React.createElement("div", { className:"section" }, React.createElement("div", { className:"error" }, error))
           ),
 
-          React.createElement("footer", { className:"footer" },
-            "Copyright® 2025 PeMFHealing.app"
-          )
+          React.createElement("footer", { className:"footer" }, "Copyright® 2025 PeMFHealing.app")
         ),
 
         React.createElement("div", { className:"player " + (playerOpen ? "open":"") },
