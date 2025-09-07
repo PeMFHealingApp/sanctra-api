@@ -1,0 +1,22 @@
+PeMFHealing.app Proprietary License
+
+Copyright © 2025 PeMFHealing.app. All rights reserved.
+
+Permission is granted to clone and build the repository solely
+for internal evaluation and for running the unmodified application
+for PeMFHealing.app projects.
+
+You may not:
+- copy, redistribute, sublicense, or sell the software or any content
+- publish or host a public fork
+- remove copyright, trademark, or attribution notices
+- reverse engineer the IR generation logic or attempt to extract models,
+  presets, or parameter databases
+- use names, logos, or brand assets to endorse or promote products
+  without prior written permission
+
+This software is provided "as is" without warranties of any kind.
+In no event shall PeMFHealing.app be liable for any claim, damages,
+or other liability arising from use of the software.
+
+Commercial licensing and partnerships: info@epemf.app
