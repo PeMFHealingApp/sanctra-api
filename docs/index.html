@@ -4,9 +4,9 @@
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="robots" content="noindex,nofollow"/>
-  <title>Sanctra • Sacred IR</title>
+  <title>Sanctra IR</title>
   <link href="https://fonts.googleapis.com/css2?family=Quicksand:wght@400;600;700&display=swap" rel="stylesheet"/>
-  <link rel="stylesheet" href="style.css?v=2025-09-07-3"/>
+  <link rel="stylesheet" href="style.css?v=2025-09-07-5"/>
 </head>
 <body>
   <div id="root"></div>
@@ -16,7 +16,7 @@
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
 
   <script>
-  const { useEffect, useRef, useState } = React;
+  const { useEffect, useRef, useState, useMemo } = React;
 
   // ---------- CONFIG ----------
   const apiOverride = new URLSearchParams(location.search).get("api");
@@ -33,79 +33,102 @@
   };
 
   // ---------- UTIL ----------
-  const pad = (n) => (n < 10 ? "0" + n : "" + n);
-  const fmtTime = (s) => { s = Math.max(0, Math.floor(s)); const m = Math.floor(s/60), r = s % 60; return m + ":" + pad(r); };
-  const clamp01 = (v) => Math.max(0, Math.min(1, v));
-
   async function safeJSON(res) {
-    try { return await res.json(); } catch (e) {
-      try { return await res.text(); } catch { return null; }
-    }
+    try { return await res.json(); } catch { try { return await res.text(); } catch { return null; } }
   }
+  const clamp01 = v => Math.max(0, Math.min(1, Number(v)));
+  const pad = n => n < 10 ? "0"+n : ""+n;
+  const fmtTime = s => { s = Math.max(0, Math.floor(s)); const m = Math.floor(s/60), r = s % 60; return m + ":" + pad(r); };
 
-  const toArray = (data, preferredKeys = []) => {
+  const toArray = (data, preferred=[]) => {
     if (Array.isArray(data)) return data;
     if (data && typeof data === "object") {
-      for (const k of preferredKeys) if (Array.isArray(data[k])) return data[k];
-      const firstArr = Object.values(data).find(v => Array.isArray(v));
-      if (firstArr) return firstArr;
+      for (const k of preferred) if (Array.isArray(data[k])) return data[k];
+      const any = Object.values(data).find(v => Array.isArray(v));
+      if (any) return any;
     }
     if (typeof data === "string") {
-      const parts = data.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+      const parts = data.split(/[\n,]+/).map(s=>s.trim()).filter(Boolean);
       if (parts.length) return parts;
     }
     return [];
   };
-
-  const normalizeCountries = (raw) =>
+  const normalizeCountries = raw =>
     toArray(raw, ["countries","items","data","list"])
       .map(x => typeof x === "string" ? x : (x?.name || x?.title || x?.country || ""))
       .filter(Boolean);
 
-  const normalizeSites = (raw) =>
+  const normalizeSites = raw =>
     toArray(raw, ["sites","items","data","list"])
       .map(x => typeof x === "string" ? x : (x?.name || x?.title || x?.site || ""))
       .filter(Boolean);
 
-  const normalizeSiteInfo = (raw) => {
-    const d = raw && typeof raw === "object" && raw.info && typeof raw.info === "object" ? raw.info : (raw || {});
+  const normalizeImage = raw => {
+    if (!raw) return "";
+    if (typeof raw === "string") return raw.startsWith("http:") && location.protocol==="https:" ? "https:" + raw.slice(5) : raw;
+    if (Array.isArray(raw)) return normalizeImage(raw[0]);
+    const c = raw.image_url || raw.url || raw.src || raw.href || raw.image || raw.result?.url || raw.data?.url || "";
+    if (!c) return "";
+    return c.startsWith("http:") && location.protocol==="https:" ? "https:" + c.slice(5) : c;
+  };
+
+  const normalizeInfo = raw => {
+    const d = raw?.info && typeof raw.info === "object" ? raw.info : (raw || {});
     return {
       region: d.region || "",
       description: d.description || d.text || "",
+      why_sacred: d.why_sacred || d.why || "",
       health_benefits: d.health_benefits || d.benefits || "",
       who_is_this_for: d.who_is_this_for || d.who || d.audience || "",
-      disclaimer: d.disclaimer || d.notes || ""
+      disclaimer: d.disclaimer || ""
     };
   };
 
-  const normalizeImage = (raw) => {
-    if (!raw) return "";
-    if (typeof raw === "string") return raw;
-    if (Array.isArray(raw)) {
-      const s = raw.find(x => typeof x === "string");
-      if (s) return s;
-      return normalizeImage(raw[0]);
-    }
-    const candidates = [
-      raw.image_url, raw.url, raw.image, raw.src, raw.href,
-      raw.data?.url, raw.result?.url, raw.result, raw.link
-    ].filter(Boolean);
-    let u = candidates[0] || "";
-    if (u && u.startsWith("http:") && location.protocol === "https:") {
-      // try upgrade to https to avoid mixed content blocks
-      u = "https:" + u.slice(5);
-    }
-    return u;
-  };
+  // ---------- CUSTOM DROPDOWN ----------
+  function Dropdown({ label, value, options, onChange, busy }) {
+    const [open, setOpen] = useState(false);
+    const ref = useRef(null);
+    useEffect(() => {
+      const onDoc = (e) => { if (!ref.current) return; if (!ref.current.contains(e.target)) setOpen(false); };
+      document.addEventListener("click", onDoc);
+      return () => document.removeEventListener("click", onDoc);
+    },[]);
+    return (
+      React.createElement("div", { className:"dd", ref },
+        React.createElement("button", {
+          className:"ddBtn",
+          onClick:()=>setOpen(o=>!o),
+          "aria-expanded": open,
+          "aria-haspopup":"listbox"
+        },
+          React.createElement("span", { className:"ddLabel" }, label),
+          React.createElement("span", { className:"ddValue" }, value || "—"),
+          React.createElement("span", { className:"arrow" })
+        ),
+        open && React.createElement("div", { className:"ddList", role:"listbox" },
+          busy ? React.createElement("div", { className:"ddLoading" }, React.createElement("div",{className:"spinner"}), "Loading…")
+               : options.map(opt =>
+                  React.createElement("div", {
+                    key:String(opt),
+                    role:"option",
+                    "aria-selected": String(opt) === String(value),
+                    className:"ddItem" + (String(opt)===String(value) ? " sel" : ""),
+                    onClick:()=>{ onChange(String(opt)); setOpen(false); }
+                  }, String(opt))
+                )
+        )
+      )
+    );
+  }
 
   // ---------- AUDIO ENGINE ----------
   class IREngine {
     constructor() {
       this.context = null;
       this.master = null;
+      this.comp = null;
       this.nodes = null;
       this.loop = false;
-      this.durationSec = 0;
       this.startedAt = 0;
       this.onUpdate = () => {};
       this._raf = null;
@@ -113,179 +136,144 @@
         base_hz: 200,
         binaural_split_hz: 4,
         isotonic_rate_hz: 0.25,
-        pink_noise_gain: 0.08
+        pink_noise_gain: 0.06
       };
     }
-
     async ensure() {
       if (!this.context) {
         const AC = window.AudioContext || window.webkitAudioContext;
         this.context = new AC({ latencyHint: "playback" });
+        // master + gentle compressor to keep below 0 dBFS
         this.master = this.context.createGain();
-        this.master.gain.value = 0.9;
-        this.master.connect(this.context.destination);
+        this.master.gain.value = 0.85;
+
+        this.comp = this.context.createDynamicsCompressor();
+        this.comp.threshold.value = -10; // dB
+        this.comp.knee.value = 18;
+        this.comp.ratio.value = 3;
+        this.comp.attack.value = 0.003;
+        this.comp.release.value = 0.25;
+
+        this.master.connect(this.comp).connect(this.context.destination);
+
         document.addEventListener("visibilitychange", () => {
-          if (document.visibilityState === "visible" && this.context.state !== "running") {
-            this.context.resume();
-          }
+          if (document.visibilityState === "visible" && this.context.state !== "running") this.context.resume();
         }, { passive:true });
       }
       if (this.context.state === "suspended") await this.context.resume();
     }
-
-    setVolume(v) { if (this.master) this.master.gain.setTargetAtTime(v, this.context.currentTime, 0.01); }
-
-    stop() {
+    setVolume(v){ if (this.master) this.master.gain.setTargetAtTime(v, this.context.currentTime, 0.01); }
+    stop(){
       if (this.nodes) {
         const { oscL, oscR, mod, noiseSrc, modalBank } = this.nodes;
-        try { oscL.stop(); } catch {}
-        try { oscR.stop(); } catch {}
-        try { mod.stop(); } catch {}
-        try { noiseSrc && noiseSrc.stop(); } catch {}
-        if (modalBank) modalBank.forEach(n => { try { n.src.stop(); } catch {} });
+        [oscL,oscR,mod,noiseSrc].forEach(n=>{ try{ n && n.stop(); }catch{} });
+        modalBank && modalBank.forEach(m=>{ try{ m.src.stop(); }catch{} });
       }
       this.nodes = null;
-      cancelAnimationFrame(this._raf);
-      this._raf = null;
+      cancelAnimationFrame(this._raf); this._raf=null;
     }
+    _num(o, keys, d=0){ for (const k of keys){ if (o && o[k]!=null && isFinite(o[k])) return Number(o[k]); } return d; }
 
-    // Flexible field reader
-    _num(o, keys, d=0){ for (const k of keys){ if (o[k]!=null && isFinite(o[k])) return Number(o[k]); } return d; }
-
-    async buildIRBuffer(irJson) {
+    async buildIRBuffer(irJson){
       await this.ensure();
-      const ctx = this.context, sr = ctx.sampleRate, TAU = Math.PI*2;
+      const ctx = this.context, sr = ctx.sampleRate;
+      const taps = Array.isArray(irJson?.early_reflection_taps) ? irJson.early_reflection_taps
+                  : Array.isArray(irJson?.taps) ? irJson.taps : [];
+      const modes = Array.isArray(irJson?.modal_summary) ? irJson.modal_summary
+                  : Array.isArray(irJson?.modes) ? irJson.modes : [];
+      const bands = Array.isArray(irJson?.rt60_s_by_band) ? irJson.rt60_s_by_band
+                  : Array.isArray(irJson?.rt60Bands) ? irJson.rt60Bands : [];
 
-      // Pull fields with liberal key mapping
-      const tapsRaw = Array.isArray(irJson?.early_reflection_taps) ? irJson.early_reflection_taps
-                      : Array.isArray(irJson?.earlyTaps) ? irJson.earlyTaps
-                      : Array.isArray(irJson?.taps) ? irJson.taps : [];
-      const modesRaw = Array.isArray(irJson?.modal_summary) ? irJson.modal_summary
-                      : Array.isArray(irJson?.modes) ? irJson.modes : [];
-      const bandsRaw = Array.isArray(irJson?.rt60_s_by_band) ? irJson.rt60_s_by_band
-                      : Array.isArray(irJson?.rt60Bands) ? irJson.rt60Bands : [];
+      const preDelay = this._num(irJson, ["pre_delay_s","predelay_s","pre_delay","preDelay"], 0);
+      const stereoWidth = clamp01(this._num(irJson, ["stereo_width","width","stereo"], 0.7));
+      const earlyLateBalance = clamp01(this._num(irJson, ["early_late_balance","mix","wet"], 0.6));
+      const hfRolloffHz = Math.max(0, this._num(irJson, ["hf_rolloff_hz","hf_rolloff"], 0));
+      const lfeGain = clamp01(this._num(irJson, ["lfe_gain","lfe"], 0));
 
-      const preDelay = this._num(irJson || {}, ["pre_delay_s","predelay_s","preDelay","pre_delay"], 0);
-      const stereoWidth = clamp01(this._num(irJson || {}, ["stereo_width","width","stereo"], 0.7));
-      const earlyLateBalance = clamp01(this._num(irJson || {}, ["early_late_balance","mix","wet"], 0.55));
-      const noiseTailGain = clamp01(this._num(irJson || {}, ["noise_tail_gain","tail_noise","tail"], 0.0));
-      const hfRolloffHz = Math.max(0, this._num(irJson || {}, ["hf_rolloff_hz","hf_rolloff","hf"], 0));
-      const lfeGain = clamp01(this._num(irJson || {}, ["lfe_gain","lfe","low_gain"], 0.0));
+      const lastTap = taps.reduce((m,t)=>Math.max(m, this._num(t,["time_s","t","delay_s","time"],0)), 0);
+      const maxRT = bands.reduce((m,b)=>Math.max(m, this._num(b,["rt60_s","rt60","decay_s"],0)), 0) || 2.5;
 
-      // IR length estimation
-      const lastTap = tapsRaw.reduce((m, t) => Math.max(m, this._num(t, ["time_s","t","time","delay_s"], 0)), 0);
-      const maxRT = bandsRaw.reduce((m, b) => Math.max(m, this._num(b, ["rt60_s","rt60","decay_s"], 0)), 0) || 2.5;
-      const irLenSec = Math.min(14, Math.max(3, preDelay + lastTap + 1.9 * maxRT));
-      const length = Math.floor(irLenSec * sr);
-      const ir = ctx.createBuffer(2, length, sr);
-      const L = ir.getChannelData(0), R = ir.getChannelData(1);
+      const irLenSec = Math.min(14, Math.max(3, preDelay + lastTap + 1.9*maxRT));
+      const len = Math.floor(sr * irLenSec);
+      const buf = ctx.createBuffer(2, len, sr);
+      const L = buf.getChannelData(0), R = buf.getChannelData(1);
       const preN = Math.floor(preDelay * sr);
 
       // Early reflections
       const earlyScale = 1 - earlyLateBalance;
-      tapsRaw.forEach((t) => {
-        const tSec = this._num(t, ["time_s","t","time","delay_s"], 0);
-        const n = Math.min(length - 1, Math.max(0, preN + Math.floor(tSec * sr)));
-        const g = this._num(t, ["gain","g","amp","a"], 0.8) * earlyScale;
-        const gl = this._num(t, ["gain_l","gl"], g * (0.75 + 0.25*Math.random()));
-        const gr = this._num(t, ["gain_r","gr"], g * (0.75 + 0.25*Math.random()));
-        const pan = this._num(t, ["pan","p"], (Math.random()*2-1)*stereoWidth); // -1..1
+      taps.forEach(t=>{
+        const tSec = this._num(t,["time_s","t","delay_s","time"],0);
+        const n = Math.min(len-1, Math.max(0, preN + Math.floor(tSec*sr)));
+        const g = this._num(t,["gain","g","amp","a"], 0.7) * earlyScale;
+        const pan = this._num(t,["pan","p"], (Math.random()*2-1)*stereoWidth);
         const wl = clamp01(0.5 - pan/2), wr = clamp01(0.5 + pan/2);
-        // small smearing for realism
-        for (let k = -2; k <= 2; k++) {
-          const i = Math.max(0, Math.min(length-1, n+k));
+        for (let k=-2;k<=2;k++){
+          const i = Math.max(0, Math.min(len-1, n+k));
           const w = 1 - Math.abs(k)/3;
-          L[i] += gl * wl * w;
-          R[i] += gr * wr * w;
+          L[i] += g * wl * w;
+          R[i] += g * wr * w;
         }
       });
 
-      // Late reverb via modal summary using band-matched RT60
-      const nearestBandRT = (f) => {
-        if (!bandsRaw.length) return maxRT;
-        let best = bandsRaw[0];
-        let d = Math.abs(f - this._num(best, ["center_hz","freq_hz","hz","center"], 500));
-        for (let i=1;i<bandsRaw.length;i++){
-          const bi = bandsRaw[i];
-          const fi = this._num(bi, ["center_hz","freq_hz","hz","center"], 500);
+      // Helpers
+      const nearestRT = f=>{
+        if (!bands.length) return maxRT;
+        let best = bands[0], bd = Math.abs(f - (best.center_hz || best.freq_hz || best.hz || 500));
+        for (let i=1;i<bands.length;i++){
+          const fi = bands[i].center_hz || bands[i].freq_hz || bands[i].hz || 500;
           const di = Math.abs(f - fi);
-          if (di < d) { d = di; best = bi; }
+          if (di < bd){ bd=di; best=bands[i]; }
         }
-        return Math.max(0.25, this._num(best, ["rt60_s","rt60","decay_s"], maxRT));
+        return Math.max(0.25, best.rt60_s || best.rt60 || best.decay_s || maxRT);
       };
+      const lambda = rt => Math.log(0.001) / Math.max(1, rt * sr);
+      const itdl = Math.floor(0.0006 * sr) * stereoWidth;
+      const lpAlpha = hfRolloffHz > 0 ? Math.exp(-(Math.PI*2) * hfRolloffHz / sr) : 0;
 
-      const itdl = Math.floor(0.0006 * sr) * stereoWidth; // interaural delay
-      const rt60ToLambda = (rt60_s) => Math.log(0.001) / Math.max(1, rt60_s * sr);
-      const lpAlpha = hfRolloffHz > 0 ? Math.exp(-(Math.PI*2) * hfRolloffHz / sr) : 0.0;
-
-      const modes = modesRaw.slice(0, 256); // be kind to CPU
-      modes.forEach((m) => {
-        const f = Math.max(20, this._num(m, ["freq_hz","f","freq","hz"], 200));
-        const gBase = this._num(m, ["gain","g","amp","a","gain_lin"], 0.5);
-        const rt60 = nearestBandRT(f);
-        const lambda = rt60ToLambda(rt60);
+      modes.slice(0,256).forEach(m=>{
+        const f = Math.max(25, Number(m.freq_hz ?? m.f ?? m.freq ?? 0));
+        if (!isFinite(f) || f<=0) return;
+        const g0 = Number(m.gain ?? m.g ?? m.amp ?? m.a ?? 0.4) * earlyLateBalance;
+        const rt = nearestRT(f);
+        const lam = lambda(rt);
         const w = (Math.PI*2) * f / sr;
         const ph = Math.random() * Math.PI*2;
-        const lateScale = earlyLateBalance;
-        let yl = 0, yr = 0;
-        for (let n=0; n<length; n++){
-          const env = Math.exp(n * lambda);
-          let s = env * Math.sin(w*n + ph) * gBase * lateScale;
-          if (hfRolloffHz > 0) {
-            yl = lpAlpha * yl + (1 - lpAlpha) * s;
-            yr = lpAlpha * yr + (1 - lpAlpha) * s;
-          } else { yl = s; yr = s; }
-          const li = n, ri = Math.min(length-1, (n + itdl) | 0);
+        let yl=0, yr=0;
+        for (let n=0;n<len;n++){
+          const env = Math.exp(n * lam);
+          let s = env * Math.sin(w*n + ph) * g0;
+          if (hfRolloffHz>0){ yl = lpAlpha*yl + (1-lpAlpha)*s; yr = lpAlpha*yr + (1-lpAlpha)*s; } else { yl=s; yr=s; }
+          const li = n, ri = Math.min(len-1, n + itdl | 0);
           L[li] += yl; R[ri] += yr;
         }
       });
 
-      // LFE enhancement
-      if (lfeGain > 0) {
+      // LFE soft bloom
+      if (lfeGain>0){
         let al=0, ar=0; const k = 0.0005 * lfeGain;
-        for (let n=0;n<length;n++){
-          al = (1-k)*al + k*L[n];
-          ar = (1-k)*ar + k*R[n];
-          L[n] += al * 0.3 * lfeGain;
-          R[n] += ar * 0.3 * lfeGain;
+        for (let n=0;n<len;n++){
+          al = (1-k)*al + k*L[n]; ar = (1-k)*ar + k*R[n];
+          L[n] += al * 0.25 * lfeGain; R[n] += ar * 0.25 * lfeGain;
         }
       }
 
-      // Optional noise tail
-      if (noiseTailGain > 0) {
-        let b0=0,b1=0,b2=0;
-        for (let n=0;n<length;n++){
-          const wL = Math.random()*2-1;
-          const wR = Math.random()*2-1;
-          b0 = 0.997*b0 + 0.003*wL;
-          b1 = 0.985*b1 + 0.015*wR;
-          b2 = 0.95*b2 + 0.05*((wL+wR)/2);
-          L[n] += (b0+b2)*0.5*noiseTailGain;
-          R[n] += (b1+b2)*0.5*noiseTailGain;
-        }
-      }
-
-      // Fade out and normalize
-      const fade = Math.min(Math.floor(length*0.12), Math.floor(0.8*sr));
+      // Fade & normalize
+      const fade = Math.min(Math.floor(len*0.12), Math.floor(sr*0.8));
       let peak = 0;
-      for (let n=0;n<length;n++){
-        if (n > length - fade) {
-          const t = (n - (length - fade)) / fade;
-          const w = 1 - t; L[n]*=w; R[n]*=w;
-        }
+      for (let n=0;n<len;n++){
+        if (n > len - fade){ const t = (n - (len - fade)) / fade; const w = 1 - t; L[n]*=w; R[n]*=w; }
         peak = Math.max(peak, Math.abs(L[n]), Math.abs(R[n]));
       }
-      const norm = peak > 0 ? Math.min(0.95/peak, 2.0) : 1;
-      for (let n=0;n<length;n++){ L[n]*=norm; R[n]*=norm; }
-
-      return ir;
+      const norm = peak>0 ? Math.min(0.92/peak, 2.0) : 1;
+      for (let n=0;n<len;n++){ L[n]*=norm; R[n]*=norm; }
+      return buf;
     }
 
     makePink(ctx, seconds){
       const len = Math.max(1, Math.floor(ctx.sampleRate * seconds));
-      const buf = ctx.createBuffer(2, len, ctx.sampleRate);
+      const b = ctx.createBuffer(2, len, ctx.sampleRate);
       for (let ch=0; ch<2; ch++){
-        const d = buf.getChannelData(ch);
+        const d = b.getChannelData(ch);
         let b0=0,b1=0,b2=0;
         for (let i=0;i<len;i++){
           const w = Math.random()*2-1;
@@ -295,92 +283,70 @@
           d[i] = (b0+b1+b2)/3;
         }
       }
-      return buf;
+      return b;
     }
 
-    createProgramNodes(irBuffer, programHints = {}, irJson = {}) {
+    createProgramNodes(irBuffer, hints={}, irJson={}){
       const ctx = this.context;
       const program = {
-        base_hz: programHints.base_hz ?? this.defaultProgram.base_hz,
-        binaural_split_hz: programHints.binaural_split_hz ?? this.defaultProgram.binaural_split_hz,
-        isotonic_rate_hz: programHints.isotonic_rate_hz ?? this.defaultProgram.isotonic_rate_hz,
-        pink_noise_gain: programHints.pink_noise_gain ?? this.defaultProgram.pink_noise_gain
+        base_hz: hints.base_hz ?? irJson?.program?.base_hz ?? this.defaultProgram.base_hz,
+        binaural_split_hz: hints.binaural_split_hz ?? irJson?.program?.binaural_split_hz ?? this.defaultProgram.binaural_split_hz,
+        isotonic_rate_hz: hints.isotonic_rate_hz ?? irJson?.program?.isotonic_rate_hz ?? this.defaultProgram.isotonic_rate_hz,
+        pink_noise_gain: hints.pink_noise_gain ?? irJson?.program?.pink_noise_gain ?? this.defaultProgram.pink_noise_gain
       };
 
-      // Convolver with the IR buffer
-      const convolver = ctx.createConvolver();
-      convolver.normalize = true;
-      convolver.buffer = irBuffer;
-
-      // Pre-convolver mixer
       const merger = ctx.createChannelMerger(2);
+      const convolver = ctx.createConvolver(); convolver.normalize = true; convolver.buffer = irBuffer;
 
-      // Dry/Wet
-      const wetGain = ctx.createGain(); wetGain.gain.value = 1.0;
-      const dryGain = ctx.createGain(); dryGain.gain.value = 0.0;
+      const wet = ctx.createGain(); wet.gain.value = 1.0;
+      const dry = ctx.createGain(); dry.gain.value = 0.0;
 
-      // Carrier oscillators (stereo, binaural)
-      const oscL = ctx.createOscillator();
-      const oscR = ctx.createOscillator();
+      const oscL = ctx.createOscillator(), oscR = ctx.createOscillator();
       oscL.type = "sine"; oscR.type = "sine";
-      const split = Math.max(0, program.binaural_split_hz);
       const base = Math.max(20, program.base_hz);
-      oscL.frequency.value = Math.max(20, base - split/2);
-      oscR.frequency.value = Math.max(20, base + split/2);
+      const split = Math.max(0, program.binaural_split_hz);
+      oscL.frequency.value = base - split/2; oscR.frequency.value = base + split/2;
 
-      // Iso amplitude modulation
-      const mod = ctx.createOscillator(); mod.type = "sine";
-      mod.frequency.value = Math.max(0.05, program.isotonic_rate_hz);
-      const modGL = ctx.createGain(); modGL.gain.value = 0.35;
-      const modGR = ctx.createGain(); modGR.gain.value = 0.35;
-      const ampL = ctx.createGain(); ampL.gain.value = 0.6;
-      const ampR = ctx.createGain(); ampR.gain.value = 0.6;
-
+      const mod = ctx.createOscillator(); mod.type = "sine"; mod.frequency.value = Math.max(0.05, program.isotonic_rate_hz);
+      const modGL = ctx.createGain(); modGL.gain.value = 0.33;
+      const modGR = ctx.createGain(); modGR.gain.value = 0.33;
+      const ampL = ctx.createGain(); ampL.gain.value = 0.45;
+      const ampR = ctx.createGain(); ampR.gain.value = 0.45;
+      mod.connect(modGL); mod.connect(modGR); modGL.connect(ampL.gain); modGR.connect(ampR.gain);
       oscL.connect(ampL); oscR.connect(ampR);
-      mod.connect(modGL); mod.connect(modGR);
-      modGL.connect(ampL.gain); modGR.connect(ampR.gain);
 
-      // Broadband exciter for full spectrum
-      const noiseBuf = this.makePink(ctx, 3.5);
-      const noiseSrc = ctx.createBufferSource(); noiseSrc.buffer = noiseBuf; noiseSrc.loop = true;
+      const noise = this.makePink(ctx, 4.0);
+      const noiseSrc = ctx.createBufferSource(); noiseSrc.buffer = noise; noiseSrc.loop = true;
       const nGain = ctx.createGain(); nGain.gain.value = Math.max(0, program.pink_noise_gain);
-
-      // Small modal oscillator bank to excite IR frequency structure
-      const modesRaw = Array.isArray(irJson?.modal_summary) ? irJson.modal_summary
-                        : Array.isArray(irJson?.modes) ? irJson.modes : [];
-      const modalBank = [];
-      const bankCount = Math.min(48, modesRaw.length);
-      for (let i=0;i<bankCount;i++){
-        const m = modesRaw[i];
-        const f = Math.max(30, Number(m?.freq_hz ?? m?.f ?? m?.freq ?? 0));
-        if (!isFinite(f) || f <= 0) continue;
-        const g = Number(m?.gain ?? m?.g ?? m?.amp ?? m?.a ?? 0.15);
-        const src = ctx.createOscillator(); src.type = "sine"; src.frequency.value = f;
-        const gn = ctx.createGain(); gn.gain.value = 0.12 * g;
-        src.connect(gn).connect(merger, 0, (i % 2)); // alternate channels
-        modalBank.push({src, gn});
-      }
-
-      // Route sources to merger
-      ampL.connect(merger, 0, 0);
-      ampR.connect(merger, 0, 1);
       noiseSrc.connect(nGain).connect(merger);
 
-      // Convolution and master
-      merger.connect(convolver);
-      merger.connect(dryGain).connect(this.master);
-      convolver.connect(wetGain).connect(this.master);
+      // Modal sprinkling
+      const modal = [];
+      const modes = Array.isArray(irJson?.modal_summary) ? irJson.modal_summary : [];
+      modes.slice(0,48).forEach((m,i)=>{
+        const f = Math.max(30, Number(m.freq_hz ?? m.f ?? m.freq ?? 0));
+        if (!isFinite(f) || f<=0) return;
+        const g = Number(m.gain ?? m.g ?? m.amp ?? m.a ?? 0.15);
+        const src = ctx.createOscillator(); src.type = "sine"; src.frequency.value = f;
+        const gn = ctx.createGain(); gn.gain.value = 0.10 * g;
+        src.connect(gn).connect(merger, 0, i%2);
+        modal.push({src, gn});
+      });
 
-      this.nodes = { oscL, oscR, mod, ampL, ampR, merger, convolver, wetGain, dryGain, noiseSrc, modalBank };
+      ampL.connect(merger, 0, 0); ampR.connect(merger, 0, 1);
+      merger.connect(convolver);
+      convolver.connect(wet).connect(this.master);
+      merger.connect(dry).connect(this.master);
+
+      this.nodes = { oscL, oscR, mod, ampL, ampR, noiseSrc, modalBank: modal, wet, dry, convolver };
     }
 
-    async loadAndStart(irJson, programHints = {}) {
+    async loadAndStart(irJson, hints={}){
       await this.ensure();
       const irBuffer = await this.buildIRBuffer(irJson);
-      this.createProgramNodes(irBuffer, programHints, irJson);
+      this.createProgramNodes(irBuffer, hints, irJson);
       const { oscL, oscR, mod, noiseSrc, modalBank } = this.nodes;
-      if (noiseSrc) noiseSrc.start();
-      modalBank && modalBank.forEach(n => n.src.start());
+      noiseSrc.start(); modalBank.forEach(m=>m.src.start());
       oscL.start(); oscR.start(); mod.start();
       this.startedAt = this.context.currentTime;
       const tick = () => { this.onUpdate(); this._raf = requestAnimationFrame(tick); };
@@ -391,231 +357,198 @@
   // ---------- APP ----------
   function App(){
     const [countries, setCountries] = useState([]);
-    const [country, setCountry] = useState("Egypt");
+    const [allSites, setAllSites] = useState([]);
+    const [country, setCountry] = useState("Egypt"); // default
     const [sites, setSites] = useState([]);
     const [site, setSite] = useState("");
-    const [siteInfo, setSiteInfo] = useState(null);
-    const [imageUrl, setImageUrl] = useState("");
-    const [minutes, setMinutes] = useState(15); // 15 | 36 | 45
+    const [info, setInfo] = useState(null);
+    const [img, setImg] = useState("");
+    const [imgBroken, setImgBroken] = useState(false);
+    const [minutes, setMinutes] = useState(15);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState("");
 
     const [playerOpen, setPlayerOpen] = useState(false);
     const [isPlaying, setIsPlaying] = useState(false);
     const [loop, setLoop] = useState(false);
-    const [volume, setVolume] = useState(0.9);
+    const [volume, setVolume] = useState(0.85);
     const [currentTime, setCurrentTime] = useState(0);
+
     const totalTime = minutes * 60;
+    const irRef = useRef(null);
 
-    const [imgBroken, setImgBroken] = useState(false);
-
-    const irEngineRef = useRef(null);
-
-    // default load
-    useEffect(() => {
+    // init countries + default Egypt + build All Sites
+    useEffect(()=>{
       let alive = true;
       const init = async () => {
-        try {
-          setLoading(true); setError("");
-          const res = await fetch(ENDPOINTS.countries);
-          const countriesRaw = await safeJSON(res);
-          const list = normalizeCountries(countriesRaw);
-          const defaultCountry = list.includes("Egypt") ? "Egypt" : (list[0] || "Egypt");
+        try{
+          setLoading(true);
+          const cRes = await fetch(ENDPOINTS.countries);
+          const cRaw = await safeJSON(cRes);
+          let list = normalizeCountries(cRaw);
+          if (!list.includes("Egypt")) list = ["Egypt", ...list.filter(x=>x!=="Egypt")];
+          // Build all sites list
+          const siteLists = await Promise.all(list.map(async c=>{
+            const r = await fetch(ENDPOINTS.sitesForCountry(c));
+            const j = await safeJSON(r);
+            return normalizeSites(j);
+          }));
+          const agg = [...new Set(siteLists.flat())].sort((a,b)=>a.localeCompare(b));
           if (!alive) return;
-          setCountries(list); setCountry(defaultCountry);
+          setCountries(["All Sites", ...list]);
+          setAllSites(agg);
 
-          const sres = await fetch(ENDPOINTS.sitesForCountry(defaultCountry));
-          const sraw = await safeJSON(sres);
-          const slist = normalizeSites(sraw);
-          const preferred = slist.find(s => /king'?s?\s+chamber/i.test(s)) ||
-                            slist.find(s => /great.*pyramid/i.test(s)) ||
-                            slist[0] || "";
-          if (!alive) return;
-          setSites(slist); setSite(preferred);
-        } catch (e) {
-          console.error(e);
-          if (!alive) return;
+          // default sites for Egypt
+          const egRes = await fetch(ENDPOINTS.sitesForCountry("Egypt"));
+          const egRaw = await safeJSON(egRes);
+          const egList = normalizeSites(egRaw);
+          const preferred = egList.find(s=>/king'?s?\s+chamber/i.test(s)) || egList[0] || "";
+          setSites(egList); setSite(preferred);
+        } catch(e){
+          console.error(e); if (!alive) return;
           setError("Unable to load countries or sites.");
-          setCountries([]); setSites([]);
         } finally { if (alive) setLoading(false); }
       };
       init();
-      return () => { alive = false; handleClose(); };
+      return ()=>{ alive=false; stopAll(true); };
     },[]);
 
-    // site meta + image
-    useEffect(() => {
-      let alive = true;
-      const run = async () => {
-        if (!site) return;
-        try {
-          setLoading(true); setError(""); setImgBroken(false);
-          const [infoRes, imgRes] = await Promise.all([
-            fetch(ENDPOINTS.siteInfo(site)),
-            fetch(ENDPOINTS.siteImage(site))
-          ]);
-          const infoRaw = await safeJSON(infoRes);
-          const imgRaw = await safeJSON(imgRes);
-          if (!alive) return;
-          setSiteInfo(normalizeSiteInfo(infoRaw));
-          setImageUrl(normalizeImage(imgRaw) || "");
-        } catch (e) {
-          console.error(e);
-          if (!alive) return;
-          setError("Failed to load site information.");
-        } finally { if (alive) setLoading(false); }
+    // load per-country sites when country changes
+    useEffect(()=>{
+      let alive=true;
+      const run = async ()=>{
+        try{
+          setLoading(true); setError("");
+          if (country==="All Sites"){
+            setSites(allSites); setSite(allSites[0] || "");
+          } else {
+            const r = await fetch(ENDPOINTS.sitesForCountry(country));
+            const j = await safeJSON(r);
+            const sl = normalizeSites(j);
+            setSites(sl); setSite(sl[0] || "");
+          }
+        } catch(e){ console.error(e); if (!alive) return; setError("Failed to load sites."); }
+        finally{ if (alive) setLoading(false); }
       };
-      run();
-      return () => { alive = false; };
+      if (allSites.length || country!=="All Sites") run();
+      return ()=>{ alive=false; };
+    }, [country, allSites]);
+
+    // site info + image
+    useEffect(()=>{
+      let alive=true;
+      const load = async ()=>{
+        if (!site) return;
+        try{
+          setLoading(true); setError(""); setImgBroken(false);
+          const [iRes, pRes] = await Promise.all([ fetch(ENDPOINTS.siteInfo(site)), fetch(ENDPOINTS.siteImage(site)) ]);
+          const iRaw = await safeJSON(iRes);
+          const pRaw = await safeJSON(pRes);
+          if (!alive) return;
+          setInfo(normalizeInfo(iRaw));
+          setImg(normalizeImage(pRaw) || "");
+        } catch(e){ console.error(e); if (!alive) return; setError("Failed to load site data."); }
+        finally{ if (alive) setLoading(false); }
+      };
+      load();
+      return ()=>{ alive=false; };
     }, [site]);
 
-    // reload sites when country changes
-    useEffect(() => {
-      let alive = true;
-      const run = async () => {
-        if (!country) return;
-        try {
-          setLoading(true); setError("");
-          const sres = await fetch(ENDPOINTS.sitesForCountry(country));
-          const sraw = await safeJSON(sres);
-          if (!alive) return;
-          const slist = normalizeSites(sraw);
-          setSites(slist);
-          setSite(slist[0] || "");
-        } catch (e) {
-          console.error(e);
-          if (!alive) return;
-          setError("Failed to load sites for country.");
-        } finally { if (alive) setLoading(false); }
-      };
-      run();
-      return () => { alive = false; };
-    }, [country]);
+    function stopOtherAppAudio(){ try{ window.parent.postMessage({type:"pemf_stop_all_audio"}, "*"); }catch{} }
 
-    const stopOtherAudio = () => {
-      try { window.parent.postMessage({ type: "pemf_stop_all_audio" }, "*"); } catch {}
-    };
+    function stopAll(collapse=false){
+      if (irRef.current){ irRef.current.stop(); irRef.current = null; }
+      setIsPlaying(false);
+      if (collapse){ setPlayerOpen(false); setCurrentTime(0); }
+    }
 
-    const tick = () => {
-      const eg = irEngineRef.current;
-      if (!eg || !eg.context) return;
-      const t = eg.context.currentTime - eg.startedAt;
+    function tick(){
+      const eg = irRef.current; if (!eg || !eg.context) return;
+      const t = Math.max(0, eg.context.currentTime - eg.startedAt);
       setCurrentTime(Math.min(totalTime, t));
-      if (t >= totalTime) {
-        if (eg.loop) {
-          handlePause(false); handlePlay(false);
-        } else {
-          handlePause();
-        }
+      if (t >= totalTime){
+        if (eg.loop){ pause(false); play(false); }
+        else pause();
       }
-    };
+    }
 
-    const handlePlay = async (sendStop = true) => {
+    async function play(sendStop=true){
       if (!site) return;
-      if (sendStop) stopOtherAudio();
+      if (sendStop) stopOtherAppAudio();
       setPlayerOpen(true); setError("");
-      try {
+      try{
         setLoading(true);
-        if (irEngineRef.current) { irEngineRef.current.stop(); irEngineRef.current = null; }
-        irEngineRef.current = new IREngine();
-        const eg = irEngineRef.current;
-        eg.loop = loop; eg.durationSec = totalTime; eg.onUpdate = tick; eg.setVolume(volume);
+        if (irRef.current) { irRef.current.stop(); irRef.current = null; }
+        irRef.current = new IREngine();
+        const eg = irRef.current; eg.loop = loop; eg.setVolume(volume); eg.onUpdate = tick;
 
-        // Pull complete IR JSON
         const resp = await fetch(ENDPOINTS.genIR, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
+          method:"POST",
+          headers:{ "Content-Type":"application/json" },
           body: JSON.stringify({ site, minutes })
         });
         const json = await safeJSON(resp);
 
-        const programHints = {
+        const hints = {
           base_hz: json?.base_hz ?? json?.carrier_hz ?? json?.program?.base_hz,
           binaural_split_hz: json?.binaural_split_hz ?? json?.program?.binaural_split_hz,
           isotonic_rate_hz: json?.isotonic_rate_hz ?? json?.program?.isotonic_rate_hz,
           pink_noise_gain: json?.source_noise_gain ?? json?.program?.pink_noise_gain
         };
 
-        await eg.loadAndStart(json || {}, programHints);
+        await eg.loadAndStart(json || {}, hints);
+        eg.startedAt = eg.context.currentTime;
         setIsPlaying(true);
-      } catch (e) {
-        console.error(e);
-        setError("IR synthesis failed.");
-      } finally { setLoading(false); }
-    };
-
-    const handlePause = (collapse = false) => {
-      if (irEngineRef.current) irEngineRef.current.stop();
-      setIsPlaying(false);
-      if (collapse) { setPlayerOpen(false); setCurrentTime(0); }
-    };
-    const handleClose = () => { handlePause(true); };
-
-    const onSeek = (v) => {
+      } catch(e){ console.error(e); setError("IR synthesis failed."); }
+      finally{ setLoading(false); }
+    }
+    function pause(collapse=false){ stopAll(collapse); }
+    function seek(v){
       const t = Number(v);
-      if (irEngineRef.current && isFinite(t)) {
-        const eg = irEngineRef.current, ctx = eg.context;
-        eg.startedAt = ctx.currentTime - Math.min(totalTime, Math.max(0, t));
-        setCurrentTime(t);
-      }
-    };
-    const onToggleLoop = () => {
-      setLoop(v => {
-        const next = !v;
-        if (irEngineRef.current) irEngineRef.current.loop = next;
-        return next;
-      });
-    };
-    const onVolume = (v) => {
-      const val = Number(v); setVolume(val);
-      if (irEngineRef.current) irEngineRef.current.setVolume(val);
-    };
+      if (!isFinite(t) || !irRef.current) return;
+      const eg = irRef.current, ctx = eg.context;
+      eg.startedAt = ctx.currentTime - Math.min(totalTime, Math.max(0, t));
+      setCurrentTime(t);
+    }
+    function setLooping(){
+      setLoop(v => { const n = !v; if (irRef.current) irRef.current.loop = n; return n; });
+    }
+    function setVol(v){
+      const val = Number(v); setVolume(val); if (irRef.current) irRef.current.setVolume(val);
+    }
 
-    const onChangeCountry = (e) => setCountry(e.target.value);
-    const onChangeSite = (e) => setSite(e.target.value);
-
+    // UI
     const minuteOptions = [15, 36, 45];
-
-    const countriesSafe = Array.isArray(countries) ? countries : normalizeCountries(countries);
-    const sitesSafe = Array.isArray(sites) ? sites : normalizeSites(sites);
 
     return (
       React.createElement(React.Fragment, null,
-        React.createElement("div", { className:"container" },
-          React.createElement("div", { className:"header" },
-            React.createElement("div", { className:"brand" }, "Sanctra • Sacred IR"),
-            React.createElement("div", { className:"muted" }, "Mobile-first • Binaural • Isotonic • Convolution")
-          ),
+        React.createElement("main", { className:"container" },
 
           React.createElement("div", { className:"dropdowns" },
-            React.createElement("div", { className:"selectWrap" },
-              React.createElement("select", { className:"select", value:country, onChange:onChangeCountry },
-                countriesSafe.map(c => React.createElement("option", {key:String(c), value:String(c)}, String(c)))
-              ),
-              React.createElement("span", { className:"arrow" })
-            ),
-            React.createElement("div", { className:"selectWrap" },
-              React.createElement("select", { className:"select", value:site, onChange:onChangeSite },
-                sitesSafe.map(s => React.createElement("option", {key:String(s), value:String(s)}, String(s)))
-              ),
-              React.createElement("span", { className:"arrow" })
-            )
+            React.createElement(Dropdown, {
+              label:"Select Country",
+              value:country,
+              options:countries,
+              onChange:setCountry,
+              busy:loading && !countries.length
+            }),
+            React.createElement(Dropdown, {
+              label:"Select Sacred Site",
+              value:site,
+              options:sites,
+              onChange:setSite,
+              busy:loading && !sites.length
+            })
           ),
 
           React.createElement("div", { className:"card" },
             React.createElement("div", { className:"hero" },
-              imageUrl && !imgBroken
-                ? React.createElement("img", {
-                    src:imageUrl, alt:site, crossOrigin:"anonymous",
-                    referrerPolicy:"no-referrer",
-                    onError:()=>setImgBroken(true)
-                  })
-                : React.createElement("div", { className:"loading" },
-                    React.createElement("div", { className:"spinner" }), "Image unavailable"
-                  ),
+              img && !imgBroken
+                ? React.createElement("img", { src:img, alt:site, crossOrigin:"anonymous", referrerPolicy:"no-referrer", onError:()=>setImgBroken(true) })
+                : React.createElement("div", { className:"loading" }, React.createElement("div", { className:"spinner"}), "Image unavailable"),
               React.createElement("button", {
                 className:"mediaOverlay " + (isPlaying ? "pause" : "play"),
-                onClick: isPlaying ? () => handlePause(false) : () => handlePlay(true),
+                onClick: isPlaying ? ()=>pause(false) : ()=>play(true),
                 title: isPlaying ? "Pause" : "Play",
                 "aria-label": isPlaying ? "Pause" : "Play"
               }, React.createElement("span", { className:"glyph" }))
@@ -625,69 +558,71 @@
               React.createElement("div", { className:"seg" },
                 minuteOptions.map(min =>
                   React.createElement("button", {
-                    key:min, className:"pill " + (minutes===min ? "active" : ""),
-                    onClick:()=>{ if(!isPlaying) setMinutes(min); }
+                    key:min, className:"pill "+(minutes===min?"active":""), onClick:()=>{ if(!isPlaying) setMinutes(min); }
                   }, `${min} min`)
                 )
               ),
-              React.createElement("div", { className:"segRight" },
-                loading ? React.createElement("div", { className:"loading" },
-                  React.createElement("div",{className:"spinner"}),"Fetching data…") : null
-              )
+              loading ? React.createElement("div", { className:"loading small" }, React.createElement("div",{className:"spinner"}),"Fetching…") : null
             ),
 
             React.createElement("div", { className:"section" },
               React.createElement("h3", null, "Country"),
               React.createElement("p", null, country || "")
             ),
+
             React.createElement("div", { className:"section" },
               React.createElement("h3", null, "Site Information"),
-              siteInfo ? React.createElement("p", null, siteInfo.description || "-")
-                       : React.createElement("p", { className:"muted" }, "Loading…")
+              info ? React.createElement("p", null, info.description || "-")
+                   : React.createElement("p", { className:"muted" }, "Loading…")
             ),
+
+            info && info.why_sacred && React.createElement("div", { className:"section" },
+              React.createElement("h3", null, "Why Sacred"),
+              React.createElement("p", null, info.why_sacred)
+            ),
+
             React.createElement("div", { className:"section" },
               React.createElement("h3", null, "Site Benefits"),
-              siteInfo ? React.createElement("p", null, siteInfo.health_benefits || "-")
-                       : React.createElement("p", { className:"muted" }, "Loading…")
+              info ? React.createElement("p", null, info.health_benefits || "-")
+                   : React.createElement("p", { className:"muted" }, "Loading…")
             ),
+
             React.createElement("div", { className:"section" },
               React.createElement("h3", null, "Who is this for"),
-              siteInfo ? React.createElement("p", null, siteInfo.who_is_this_for || "-")
-                       : React.createElement("p", { className:"muted" }, "Loading…")
+              info ? React.createElement("p", null, info.who_is_this_for || "-")
+                   : React.createElement("p", { className:"muted" }, "Loading…")
             ),
+
             React.createElement("div", { className:"section" },
               React.createElement("h3", null, "Disclaimer"),
-              siteInfo
-                ? React.createElement("p", { className:"fineprint" }, siteInfo.disclaimer || "-")
-                : React.createElement("p", { className:"fineprint" }, "Loading…")
+              React.createElement("p", { className:"fineprint" },
+                "Disclaimer: The information provided is for educational and exploratory purposes only and should not be considered medical advice. Consult a healthcare professional before using any healing practices."
+              )
             ),
-            error && React.createElement("div", { className:"section" },
-              React.createElement("div", { className:"error" }, error)
-            )
+
+            error && React.createElement("div", { className:"section" }, React.createElement("div", { className:"error" }, error))
+          ),
+
+          React.createElement("footer", { className:"footer" },
+            "Copyright® 2025 PeMFHealing.app"
           )
         ),
 
-        React.createElement("div", { className:"player " + (playerOpen ? "open" : "") },
+        React.createElement("div", { className:"player " + (playerOpen ? "open":"") },
           React.createElement("div", { className:"playerInner" },
             React.createElement("div", { className:"playerRow" },
-              React.createElement("img", { src:imageUrl, className:"thumb", alt:"" }),
-              React.createElement("div", null,
-                React.createElement("div", { className:"title" }, `Country: ${country || "-"} · Site: ${site || "-"}`)
-              )
+              React.createElement("img", { className:"thumb", src:img || "", alt:"" }),
+              React.createElement("div", { className:"title" }, `Country: ${country || "-"} · Site: ${site || "-"}`)
             ),
             React.createElement("div", { className:"playerCtrls" },
-              React.createElement("button", {
-                className:"iconBtn",
-                onClick: isPlaying ? () => handlePause(false) : () => handlePlay(true),
-                title: isPlaying ? "Pause" : "Play"
-              }, isPlaying ? "❚❚" : "▶"),
-              React.createElement("button", { className:"iconBtn " + (loop ? "active" : ""), onClick:onToggleLoop, title:"Loop" }, "∞"),
-              React.createElement("input", { className:"vol", type:"range", min:"0", max:"1", step:"0.01", value:volume, onChange:(e)=>onVolume(e.target.value), title:"Volume", "aria-label":"Volume" }),
+              React.createElement("button", { className:"iconBtn", onClick: isPlaying ? ()=>pause(false) : ()=>play(true), title: isPlaying ? "Pause":"Play" }, isPlaying ? "❚❚" : "▶"),
+              React.createElement("button", { className:"iconBtn " + (loop?"active":""), onClick:setLooping, title:"Loop" }, "∞"),
+              React.createElement("input", { className:"vol", type:"range", min:"0", max:"1", step:"0.01", value:volume, onChange:e=>setVol(e.target.value), title:"Volume", "aria-label":"Volume" }),
               React.createElement("div", { className:"pushRight" }),
-              React.createElement("button", { className:"iconBtn closeBtn", onClick:handleClose, title:"Close" }, "✕")
+              React.createElement("button", { className:"iconBtn closeBtn", onClick:()=>pause(true), title:"Close" }, "✕")
             ),
             React.createElement("div", { className:"bar" },
-              React.createElement("input", { className:"progress", type:"range", min:"0", max:String(totalTime), step:"1", value:String(Math.min(currentTime, totalTime)), onChange:(e)=>onSeek(e.target.value) }),
+              React.createElement("input", { className:"progress", type:"range", min:"0", max:String(totalTime), step:"1", value:String(Math.min(currentTime,totalTime)), onChange:e=>seek(e.target.value) }),
               React.createElement("div", { className:"timeRow" },
                 React.createElement("div", null, fmtTime(currentTime)),
                 React.createElement("div", null, fmtTime(totalTime))
