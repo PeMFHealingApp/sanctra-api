@@ -1,945 +1,659 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta
-      name="viewport"
-      content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover"
-    />
-    <meta name="robots" content="index, follow" />
-    <title>Sanctra • Sacred IR Player</title>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex,nofollow" />
+  <title>Sanctra • Sacred IR</title>
 
-    <!-- Quicksand font -->
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Quicksand:wght@400;600;700&display=swap"
-      rel="stylesheet"
-    />
+  <!-- Quicksand font -->
+  <link href="https://fonts.googleapis.com/css2?family=Quicksand:wght@400;600;700&display=swap" rel="stylesheet" />
 
-    <!-- App styles -->
-    <link rel="stylesheet" href="./style.css" />
-  </head>
-  <body>
-    <div id="root"></div>
+  <!-- App styles -->
+  <link rel="stylesheet" href="style.css?v=2025-09-07-2" />
+</head>
+<body>
+  <div id="root"></div>
 
-    <!-- React + ReactDOM -->
-    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <!-- React -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
 
-    <script>
-      const { useEffect, useMemo, useRef, useState } = React;
+  <script>
+    const { useEffect, useRef, useState } = React;
 
-      // ================= API ENDPOINTS =================
-      const API_BASE = "https://sanctra-api.onrender.com";
-      const ENDPOINTS = {
-        countries: API_BASE + "/countries",
-        sitesForCountry: c => API_BASE + "/sites-for-country?country=" + encodeURIComponent(c),
-        siteInfo: s => API_BASE + "/site-info?site=" + encodeURIComponent(s),
-        siteImage: s => API_BASE + "/site-image?site=" + encodeURIComponent(s),
-        genIR: API_BASE + "/generate-ir"
-      };
+    // ================= API ENDPOINTS =================
+    const apiOverride = new URLSearchParams(location.search).get("api");
+    const API_BASE = (apiOverride && /^https?:\/\//.test(apiOverride))
+      ? apiOverride.replace(/\/+$/, "")
+      : "https://sanctra-api.onrender.com";
 
-      // ================= UTIL =================
-      const pad = n => (n < 10 ? "0" + n : "" + n);
-      const fmtTime = s => {
-        s = Math.max(0, Math.floor(s));
-        const m = Math.floor(s / 60),
-          r = s % 60;
-        return m + ":" + pad(r);
-      };
-
-      // ================= IR ENGINE (Web Audio) =================
-      class IREngine {
-        constructor() {
-          this.context = null;
-          this.master = null;
-          this.nodes = null;
-          this.loop = false;
-          this.durationSec = 0;
-          this.startedAt = 0;
-          this.onUpdate = () => {};
-          this._raf = null;
-
-          // Defaults if API doesn't provide carriers
-          this.defaultProgram = {
-            base_hz: 200,              // carrier base
-            binaural_split_hz: 4,      // L/R split
-            isotonic_rate_hz: 0.25,    // slow amplitude pulse
-            pink_noise_gain: 0.0       // extra source noise before convolver
-          };
-        }
-
-        async ensure() {
-          if (!this.context) {
-            const AC = window.AudioContext || window.webkitAudioContext;
-            this.context = new AC({ latencyHint: "playback" });
-            this.master = this.context.createGain();
-            this.master.gain.value = 0.9;
-            this.master.connect(this.context.destination);
-
-            document.addEventListener(
-              "visibilitychange",
-              () => {
-                if (document.visibilityState === "visible" && this.context.state !== "running") {
-                  this.context.resume();
-                }
-              },
-              { passive: true }
-            );
-          }
-          if (this.context.state === "suspended") await this.context.resume();
-        }
-
-        setVolume(v) {
-          if (this.master) this.master.gain.setTargetAtTime(v, this.context.currentTime, 0.01);
-        }
-
-        stop() {
-          if (this.nodes) {
-            const { oscL, oscR, mod, noiseSrc } = this.nodes;
-            try { oscL.stop(); } catch {}
-            try { oscR.stop(); } catch {}
-            try { mod.stop(); } catch {}
-            try { noiseSrc && noiseSrc.stop(); } catch {}
-          }
-          this.nodes = null;
-          cancelAnimationFrame(this._raf);
-          this._raf = null;
-        }
-
-        // ---- Build IR Buffer honoring all data we get ----
-        // Expected JSON keys (all optional-safe):
-        //   sample_rate_hz, pre_delay_s,
-        //   early_reflection_taps: [{time_s, gain_l, gain_r}],
-        //   modal_summary: [{freq_hz, decay_s, gain}],
-        //   rt60_s_by_band: [{center_hz, rt60_s}],
-        //   stereo_width (0..1), early_late_balance (0..1),
-        //   noise_tail_gain (0..1), hf_rolloff_hz, lfe_gain
-        async buildIRBuffer(irJson) {
-          await this.ensure();
-          const ctx = this.context;
-          const sr = ctx.sampleRate;
-
-          const taps = irJson.early_reflection_taps || [];
-          const modes = irJson.modal_summary || [];
-          const bands = irJson.rt60_s_by_band || [];
-          const preDelay = Math.max(0, irJson.pre_delay_s || 0);
-          const stereoWidth = clamp01(irJson.stereo_width ?? 0.65);
-          const earlyLateBalance = clamp01(irJson.early_late_balance ?? 0.5);
-          const noiseTailGain = clamp01(irJson.noise_tail_gain ?? 0.0);
-          const hfRolloffHz = Math.max(0, irJson.hf_rolloff_hz || 0); // 0 = ignore
-          const lfeGain = clamp01(irJson.lfe_gain ?? 0.0);
-
-          // Convert RT60 to per-sample exponential factor
-          const rt60ToLambda = (rt60_s) => {
-            const N = Math.max(1, rt60_s * sr);
-            return Math.log(0.001) / N; // negative
-          };
-
-          // Estimate IR length
-          const lastTap = taps.reduce((m, t) => Math.max(m, t.time_s || 0), 0);
-          const maxRT = bands.reduce((m, b) => Math.max(m, b.rt60_s || 0), 0) || 2.0;
-          const irLenSec = Math.min(12.0, Math.max(2.5, preDelay + lastTap + 1.8 * (maxRT || 2.0)));
-          const length = Math.floor(irLenSec * sr);
-
-          const ir = ctx.createBuffer(2, length, sr);
-          const L = ir.getChannelData(0);
-          const R = ir.getChannelData(1);
-
-          // Pre-delay offset
-          const preN = Math.floor(preDelay * sr);
-
-          // ---- 1) Early reflections (weighted by earlyLateBalance) ----
-          const earlyScale = 1 - earlyLateBalance;
-          taps.forEach((t) => {
-            const n = Math.min(length - 1, Math.max(0, preN + Math.floor((t.time_s || 0) * sr)));
-            const baseL = (t.gain_l ?? t.gain ?? 0) * earlyScale;
-            const baseR = (t.gain_r ?? t.gain ?? 0) * earlyScale;
-            // Apply stereo width (crossfeed reduces width)
-            const cross = (1 - stereoWidth) * 0.5;
-            L[n] += baseL * (1 - cross) + baseR * cross;
-            R[n] += baseR * (1 - cross) + baseL * cross;
-          });
-
-          // ---- 2) Late tail from modal summary (frequency-dependent RT via nearest band) ----
-          const TAU = Math.PI * 2;
-          const itdl = Math.floor(0.0006 * sr) * stereoWidth; // interaural delay scales with width
-          modes.forEach((m) => {
-            const f = Math.max(20, m.freq_hz || 200);
-            const gBase = m.gain == null ? 0.5 : m.gain;
-
-            // nearest band RT60
-            let rt60 = maxRT || 2.0;
-            if (bands.length) {
-              let nearest = bands[0],
-                d = Math.abs(f - bands[0].center_hz);
-              for (let i = 1; i < bands.length; i++) {
-                const di = Math.abs(f - bands[i].center_hz);
-                if (di < d) {
-                  d = di;
-                  nearest = bands[i];
-                }
-              }
-              rt60 = Math.max(0.25, nearest.rt60_s || rt60);
-            }
-            const lambda = rt60ToLambda(rt60); // negative
-            const w = TAU * f / sr;
-            const ph = Math.random() * TAU;
-            const lateScale = earlyLateBalance; // distribute energy into late field
-
-            // lightweight HF rolloff per-sample (if specified)
-            const lpAlpha = hfRolloffHz > 0 ? Math.exp(-TAU * hfRolloffHz / sr) : 0.0;
-            let yl = 0, yr = 0;
-
-            for (let n = 0; n < length; n++) {
-              const env = Math.exp(n * lambda);
-              let s = env * Math.sin(w * n + ph) * gBase * lateScale;
-
-              if (hfRolloffHz > 0) {
-                yl = lpAlpha * yl + (1 - lpAlpha) * s;
-                yr = lpAlpha * yr + (1 - lpAlpha) * s;
-              } else {
-                yl = s; yr = s;
-              }
-              const li = n,
-                    ri = Math.min(length - 1, n + itdl | 0);
-              L[li] += yl;
-              R[ri] += yr;
-            }
-          });
-
-          // ---- 3) Low-frequency enhancement if requested ----
-          if (lfeGain > 0) {
-            // simple integrator-ish low-shelf
-            let al = 0, ar = 0;
-            const k = 0.0005 * lfeGain;
-            for (let n = 0; n < length; n++) {
-              al = (1 - k) * al + k * L[n];
-              ar = (1 - k) * ar + k * R[n];
-              L[n] += al * 0.3 * lfeGain;
-              R[n] += ar * 0.3 * lfeGain;
-            }
-          }
-
-          // ---- 4) Add very soft pink-ish noise tail (if requested) ----
-          if (noiseTailGain > 0) {
-            let b0 = 0, b1 = 0, b2 = 0;
-            for (let n = 0; n < length; n++) {
-              const whiteL = Math.random() * 2 - 1;
-              const whiteR = Math.random() * 2 - 1;
-              b0 = 0.997 * b0 + 0.003 * whiteL;
-              b1 = 0.985 * b1 + 0.015 * whiteR;
-              b2 = 0.950 * b2 + 0.050 * ((whiteL + whiteR) * 0.5);
-              const pnL = (b0 + b2) * 0.5 * noiseTailGain;
-              const pnR = (b1 + b2) * 0.5 * noiseTailGain;
-              L[n] += pnL;
-              R[n] += pnR;
-            }
-          }
-
-          // ---- 5) Tail fade + normalize ----
-          const fade = Math.min(Math.floor(length * 0.12), Math.floor(0.8 * sr));
-          let peak = 0;
-          for (let n = 0; n < length; n++) {
-            if (n > length - fade) {
-              const t = (n - (length - fade)) / fade;
-              const w = 1 - t;
-              L[n] *= w;
-              R[n] *= w;
-            }
-            peak = Math.max(peak, Math.abs(L[n]), Math.abs(R[n]));
-          }
-          const norm = peak > 1 ? 1 / peak : 0.95;
-          for (let n = 0; n < length; n++) {
-            L[n] *= norm;
-            R[n] *= norm;
-          }
-
-          return ir;
-        }
-
-        // Create the playback graph:
-        //   - stereo carrier oscillators with binaural split (from API if provided)
-        //   - slow isotonic amplitude modulation (from API if provided)
-        //   - optional pre-convolver pink noise source (from API if provided)
-        //   - convolver with our IR buffer
-        createProgramNodes(irBuffer, programHints = {}) {
-          const ctx = this.context;
-
-          const program = {
-            base_hz: programHints.base_hz ?? this.defaultProgram.base_hz,
-            binaural_split_hz: programHints.binaural_split_hz ?? this.defaultProgram.binaural_split_hz,
-            isotonic_rate_hz: programHints.isotonic_rate_hz ?? this.defaultProgram.isotonic_rate_hz,
-            pink_noise_gain: programHints.pink_noise_gain ?? this.defaultProgram.pink_noise_gain
-          };
-
-          const convolver = ctx.createConvolver();
-          convolver.buffer = irBuffer;
-
-          // Pre-convolver mix
-          const merger = ctx.createChannelMerger(2);
-          const wetGain = ctx.createGain(); wetGain.gain.value = 1.0;
-          const dryGain = ctx.createGain(); dryGain.gain.value = 0.0; // reverb-dominant texture
-
-          // Left and Right carriers
-          const oscL = ctx.createOscillator();
-          const oscR = ctx.createOscillator();
-          oscL.type = "sine"; oscR.type = "sine";
-          const split = program.binaural_split_hz;
-          oscL.frequency.value = Math.max(20, program.base_hz - split / 2);
-          oscR.frequency.value = Math.max(20, program.base_hz + split / 2);
-
-          // Isotonic amplitude modulator
-          const mod = ctx.createOscillator(); mod.type = "sine";
-          mod.frequency.value = Math.max(0.05, program.isotonic_rate_hz);
-          const modGL = ctx.createGain(); modGL.gain.value = 0.35;
-          const modGR = ctx.createGain(); modGR.gain.value = 0.35;
-
-          // Amplitude gates per channel
-          const ampL = ctx.createGain(); ampL.gain.value = 0.6;
-          const ampR = ctx.createGain(); ampR.gain.value = 0.6;
-
-          // Route carriers
-          oscL.connect(ampL); oscR.connect(ampR);
-          mod.connect(modGL); mod.connect(modGR);
-          modGL.connect(ampL.gain); modGR.connect(ampR.gain);
-
-          // Merge to stereo before convolver
-          ampL.connect(merger, 0, 0);
-          ampR.connect(merger, 0, 1);
-
-          // Optional pre-convolver pink noise (for body and realism)
-          let noiseSrc = null;
-          if (program.pink_noise_gain > 0) {
-            const noiseBuf = makeLoopedPinkNoise(ctx, 3.0); // 3s loop
-            const nGain = ctx.createGain();
-            nGain.gain.value = program.pink_noise_gain;
-            noiseSrc = ctx.createBufferSource();
-            noiseSrc.buffer = noiseBuf;
-            noiseSrc.loop = true;
-            noiseSrc.connect(nGain).connect(merger);
-          }
-
-          // To convolver and to master
-          merger.connect(convolver);
-          merger.connect(dryGain).connect(this.master);
-          convolver.connect(wetGain).connect(this.master);
-
-          this.nodes = { oscL, oscR, mod, ampL, ampR, merger, convolver, wetGain, dryGain, noiseSrc };
-        }
-
-        async loadAndStart(irJson, programHints = {}) {
-          await this.ensure();
-          const irBuffer = await this.buildIRBuffer(irJson);
-          this.createProgramNodes(irBuffer, programHints);
-
-          const { oscL, oscR, mod, noiseSrc } = this.nodes;
-          if (noiseSrc) noiseSrc.start();
-          oscL.start(); oscR.start(); mod.start();
-<script>
-  const { useEffect, useMemo, useRef, useState } = React;
-
-  // ================= API ENDPOINTS =================
-  // Optional: support ?api=... override
-  const apiOverride = new URLSearchParams(location.search).get("api");
-  const API_BASE = (apiOverride && /^https?:\/\//.test(apiOverride))
-    ? apiOverride.replace(/\/+$/, "")
-    : "https://sanctra-api.onrender.com";
-
-  const ENDPOINTS = {
-    countries: API_BASE + "/countries",
-    sitesForCountry: c => API_BASE + "/sites-for-country?country=" + encodeURIComponent(c),
-    siteInfo: s => API_BASE + "/site-info?site=" + encodeURIComponent(s),
-    siteImage: s => API_BASE + "/site-image?site=" + encodeURIComponent(s),
-    genIR: API_BASE + "/generate-ir"
-  };
-
-  // ================= UTIL =================
-  const pad = n => (n < 10 ? "0" + n : "" + n);
-  const fmtTime = s => {
-    s = Math.max(0, Math.floor(s));
-    const m = Math.floor(s / 60), r = s % 60;
-    return m + ":" + pad(r);
-  };
-
-  // Robust array normalizers — tolerate many shapes:
-  const toArray = (data, preferredKeys = []) => {
-    if (Array.isArray(data)) return data;
-    if (data && typeof data === "object") {
-      for (const k of preferredKeys) {
-        if (Array.isArray(data[k])) return data[k];
-      }
-      // Fallback: first array value inside the object
-      const firstArr = Object.values(data).find(v => Array.isArray(v));
-      if (firstArr) return firstArr;
-    }
-    // If server returned a newline-delimited string or CSV-ish
-    if (typeof data === "string") {
-      try {
-        // split on newlines or commas and trim
-        const bits = data.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
-        if (bits.length) return bits;
-      } catch {}
-    }
-    return [];
-  };
-
-  const normalizeCountries = (data) => toArray(data, ["countries", "items", "data", "list"])
-    .map(x => typeof x === "string" ? x : (x?.name || x?.title || x?.country || ""))
-    .filter(Boolean);
-
-  const normalizeSites = (data) => toArray(data, ["sites", "items", "data", "list"])
-    .map(x => typeof x === "string" ? x : (x?.name || x?.title || x?.site || ""))
-    .filter(Boolean);
-
-  const normalizeSiteInfo = (data) => {
-    if (!data || typeof data !== "object") return {};
-    // Accept nested shapes like { info: {...} }
-    const d = data.info && typeof data.info === "object" ? data.info : data;
-    return {
-      region: d.region || "",
-      description: d.description || d.text || "",
-      health_benefits: d.health_benefits || d.benefits || "",
-      who_is_this_for: d.who_is_this_for || d.who || d.audience || "",
-      disclaimer: d.disclaimer || d.notes || ""
-    };
-  };
-
-  const normalizeImage = (data) => {
-    if (!data) return "";
-    if (typeof data === "string") return data;
-    return data.url || data.image || data.src || "";
-  };
-
-  // ================= IR ENGINE (unchanged core, trimmed here) =================
-  class IREngine {
-    constructor() {
-      this.context = null;
-      this.master = null;
-      this.nodes = null;
-      this.loop = false;
-      this.durationSec = 0;
-      this.startedAt = 0;
-      this.onUpdate = () => {};
-      this._raf = null;
-      this.defaultProgram = {
-        base_hz: 200,
-        binaural_split_hz: 4,
-        isotonic_rate_hz: 0.25,
-        pink_noise_gain: 0.0
-      };
-    }
-    async ensure(){
-      if (!this.context){
-        const AC = window.AudioContext || window.webkitAudioContext;
-        this.context = new AC({ latencyHint: "playback" });
-        this.master = this.context.createGain();
-        this.master.gain.value = 0.9;
-        this.master.connect(this.context.destination);
-        document.addEventListener("visibilitychange", () => {
-          if (document.visibilityState === "visible" && this.context.state !== "running") {
-            this.context.resume();
-          }
-        }, { passive: true });
-      }
-      if (this.context.state === "suspended") await this.context.resume();
-    }
-    setVolume(v){ if (this.master) this.master.gain.setTargetAtTime(v, this.context.currentTime, 0.01); }
-    stop(){
-      if (this.nodes){
-        const { oscL, oscR, mod, noiseSrc } = this.nodes;
-        try{ oscL.stop(); }catch{}
-        try{ oscR.stop(); }catch{}
-        try{ mod.stop(); }catch{}
-        try{ noiseSrc && noiseSrc.stop(); }catch{}
-      }
-      this.nodes = null;
-      cancelAnimationFrame(this._raf);
-      this._raf = null;
-    }
-    async buildIRBuffer(irJson){
-      await this.ensure();
-      const ctx = this.context, sr = ctx.sampleRate;
-      const taps = irJson.early_reflection_taps || [];
-      const modes = irJson.modal_summary || [];
-      const bands = irJson.rt60_s_by_band || [];
-      const preDelay = Math.max(0, irJson.pre_delay_s || 0);
-      const stereoWidth = clamp01(irJson.stereo_width ?? 0.65);
-      const earlyLateBalance = clamp01(irJson.early_late_balance ?? 0.5);
-      const noiseTailGain = clamp01(irJson.noise_tail_gain ?? 0.0);
-      const hfRolloffHz = Math.max(0, irJson.hf_rolloff_hz || 0);
-      const lfeGain = clamp01(irJson.lfe_gain ?? 0.0);
-      const rt60ToLambda = (rt60_s) => Math.log(0.001) / Math.max(1, rt60_s * sr);
-      const lastTap = taps.reduce((m, t) => Math.max(m, t.time_s || 0), 0);
-      const maxRT = bands.reduce((m, b) => Math.max(m, b.rt60_s || 0), 0) || 2.0;
-      const irLenSec = Math.min(12.0, Math.max(2.5, preDelay + lastTap + 1.8 * (maxRT || 2.0)));
-      const length = Math.floor(irLenSec * sr);
-      const ir = ctx.createBuffer(2, length, sr);
-      const L = ir.getChannelData(0), R = ir.getChannelData(1);
-      const preN = Math.floor(preDelay * sr);
-      // Early reflections
-      const earlyScale = 1 - earlyLateBalance;
-      taps.forEach((t) => {
-        const n = Math.min(length - 1, Math.max(0, preN + Math.floor((t.time_s || 0) * sr)));
-        const baseL = (t.gain_l ?? t.gain ?? 0) * earlyScale;
-        const baseR = (t.gain_r ?? t.gain ?? 0) * earlyScale;
-        const cross = (1 - stereoWidth) * 0.5;
-        L[n] += baseL * (1 - cross) + baseR * cross;
-        R[n] += baseR * (1 - cross) + baseL * cross;
-      });
-      // Late field
-      const TAU = Math.PI * 2;
-      const itdl = Math.floor(0.0006 * sr) * stereoWidth;
-      modes.forEach((m) => {
-        const f = Math.max(20, m.freq_hz || 200);
-        const gBase = m.gain == null ? 0.5 : m.gain;
-        let rt60 = maxRT || 2.0;
-        if (bands.length){
-          let nearest = bands[0], d = Math.abs(f - bands[0].center_hz);
-          for (let i=1;i<bands.length;i++){
-            const di = Math.abs(f - bands[i].center_hz);
-            if (di < d){ d = di; nearest = bands[i]; }
-          }
-          rt60 = Math.max(0.25, nearest.rt60_s || rt60);
-        }
-        const lambda = rt60ToLambda(rt60);
-        const w = TAU * f / sr;
-        const ph = Math.random() * TAU;
-        const lateScale = earlyLateBalance;
-        const lpAlpha = hfRolloffHz > 0 ? Math.exp(-TAU * hfRolloffHz / sr) : 0.0;
-        let yl = 0, yr = 0;
-        for (let n=0;n<length;n++){
-          const env = Math.exp(n * lambda);
-          let s = env * Math.sin(w*n + ph) * gBase * lateScale;
-          if (hfRolloffHz > 0){
-            yl = lpAlpha * yl + (1 - lpAlpha) * s;
-            yr = lpAlpha * yr + (1 - lpAlpha) * s;
-          } else { yl = s; yr = s; }
-          const li = n, ri = Math.min(length - 1, (n + itdl) | 0);
-          L[li] += yl; R[ri] += yr;
-        }
-      });
-      // LFE
-      if (lfeGain > 0){
-        let al=0, ar=0; const k = 0.0005 * lfeGain;
-        for (let n=0;n<length;n++){
-          al = (1 - k) * al + k * L[n];
-          ar = (1 - k) * ar + k * R[n];
-          L[n] += al * 0.3 * lfeGain;
-          R[n] += ar * 0.3 * lfeGain;
-        }
-      }
-      // Noise tail
-      if (noiseTailGain > 0){
-        let b0=0,b1=0,b2=0;
-        for (let n=0;n<length;n++){
-          const whiteL = Math.random()*2-1;
-          const whiteR = Math.random()*2-1;
-          b0 = 0.997*b0 + 0.003*whiteL;
-          b1 = 0.985*b1 + 0.015*whiteR;
-          b2 = 0.950*b2 + 0.050*((whiteL+whiteR)/2);
-          L[n] += (b0+b2)*0.5*noiseTailGain;
-          R[n] += (b1+b2)*0.5*noiseTailGain;
-        }
-      }
-      // Fade + normalize
-      const fade = Math.min(Math.floor(length*0.12), Math.floor(0.8*sr));
-      let peak = 0;
-      for (let n=0;n<length;n++){
-        if (n > length - fade){
-          const t = (n - (length - fade))/fade;
-          const w = 1 - t; L[n]*=w; R[n]*=w;
-        }
-        peak = Math.max(peak, Math.abs(L[n]), Math.abs(R[n]));
-      }
-      const norm = peak > 1 ? 1/peak : 0.95;
-      for (let n=0;n<length;n++){ L[n]*=norm; R[n]*=norm; }
-      return ir;
-    }
-    createProgramNodes(irBuffer, programHints = {}){
-      const ctx = this.context;
-      const program = {
-        base_hz: programHints.base_hz ?? this.defaultProgram.base_hz,
-        binaural_split_hz: programHints.binaural_split_hz ?? this.defaultProgram.binaural_split_hz,
-        isotonic_rate_hz: programHints.isotonic_rate_hz ?? this.defaultProgram.isotonic_rate_hz,
-        pink_noise_gain: programHints.pink_noise_gain ?? this.defaultProgram.pink_noise_gain
-      };
-      const convolver = ctx.createConvolver(); convolver.buffer = irBuffer;
-      const merger = ctx.createChannelMerger(2);
-      const wetGain = ctx.createGain(); wetGain.gain.value = 1.0;
-      const dryGain = ctx.createGain(); dryGain.gain.value = 0.0;
-      const oscL = ctx.createOscillator(); const oscR = ctx.createOscillator();
-      oscL.type = "sine"; oscR.type = "sine";
-      const split = program.binaural_split_hz;
-      oscL.frequency.value = Math.max(20, program.base_hz - split/2);
-      oscR.frequency.value = Math.max(20, program.base_hz + split/2);
-      const mod = ctx.createOscillator(); mod.type="sine";
-      mod.frequency.value = Math.max(0.05, program.isotonic_rate_hz);
-      const modGL = ctx.createGain(); modGL.gain.value = 0.35;
-      const modGR = ctx.createGain(); modGR.gain.value = 0.35;
-      const ampL = ctx.createGain(); ampL.gain.value = 0.6;
-      const ampR = ctx.createGain(); ampR.gain.value = 0.6;
-      oscL.connect(ampL); oscR.connect(ampR);
-      mod.connect(modGL); mod.connect(modGR);
-      modGL.connect(ampL.gain); modGR.connect(ampR.gain);
-      ampL.connect(merger, 0, 0); ampR.connect(merger, 0, 1);
-      let noiseSrc = null;
-      if (program.pink_noise_gain > 0){
-        const noiseBuf = makeLoopedPinkNoise(ctx, 3.0);
-        const nGain = ctx.createGain(); nGain.gain.value = program.pink_noise_gain;
-        noiseSrc = ctx.createBufferSource(); noiseSrc.buffer = noiseBuf; noiseSrc.loop = true;
-        noiseSrc.connect(nGain).connect(merger);
-      }
-      merger.connect(convolver);
-      merger.connect(dryGain).connect(this.master);
-      convolver.connect(wetGain).connect(this.master);
-      this.nodes = { oscL, oscR, mod, ampL, ampR, merger, convolver, wetGain, dryGain, noiseSrc };
-    }
-    async loadAndStart(irJson, programHints = {}){
-      await this.ensure();
-      const irBuffer = await this.buildIRBuffer(irJson);
-      this.createProgramNodes(irBuffer, programHints);
-      const { oscL, oscR, mod, noiseSrc } = this.nodes;
-      if (noiseSrc) noiseSrc.start();
-      oscL.start(); oscR.start(); mod.start();
-      this.startedAt = this.context.currentTime;
-      const tick = () => { this.onUpdate(); this._raf = requestAnimationFrame(tick); };
-      this._raf = requestAnimationFrame(tick);
-    }
-  }
-
-  function clamp01(v){ return Math.max(0, Math.min(1, v)); }
-  function makeLoopedPinkNoise(ctx, seconds){
-    const len = Math.max(1, Math.floor(ctx.sampleRate * seconds));
-    const buf = ctx.createBuffer(2, len, ctx.sampleRate);
-    for (let ch=0; ch<2; ch++){
-      const data = buf.getChannelData(ch);
-      let b0=0,b1=0,b2=0;
-      for (let i=0;i<len;i++){
-        const white = Math.random()*2-1;
-        b0 = 0.997*b0 + 0.003*white;
-        b1 = 0.985*b1 + 0.015*white;
-        b2 = 0.950*b2 + 0.050*white;
-        data[i] = (b0+b1+b2)/3;
-      }
-    }
-    return buf;
-  }
-
-  // =================== React App ===================
-  function App(){
-    const [countries, setCountries] = useState([]);   // always arrays
-    const [country, setCountry] = useState("Egypt");
-    const [sites, setSites] = useState([]);
-    const [site, setSite] = useState("");
-    const [siteInfo, setSiteInfo] = useState(null);
-    const [imageUrl, setImageUrl] = useState("");
-    const [minutes, setMinutes] = useState(15); // 15 | 36 | 45
-    const [loading, setLoading] = useState(false);
-    const [error, setError] = useState("");
-
-    const [playerOpen, setPlayerOpen] = useState(false);
-    const [isPlaying, setIsPlaying] = useState(false);
-    const [loop, setLoop] = useState(false);
-    const [volume, setVolume] = useState(0.9);
-    const [currentTime, setCurrentTime] = useState(0);
-    const totalTime = minutes * 60;
-
-    const irEngineRef = useRef(null);
-
-    // Default load Egypt + King's Chamber
-    useEffect(() => {
-      const init = async () => {
-        try {
-          setLoading(true); setError("");
-          const res = await fetch(ENDPOINTS.countries);
-          let raw = null;
-          try { raw = await res.json(); } catch {}
-          const list = normalizeCountries(raw ?? []);
-          setCountries(list);
-          setCountry(list.includes("Egypt") ? "Egypt" : (list[0] || "Egypt"));
-
-          const sres = await fetch(ENDPOINTS.sitesForCountry(list.includes("Egypt") ? "Egypt" : (list[0] || "Egypt")));
-          let sraw = null;
-          try { sraw = await sres.json(); } catch {}
-          const slist = normalizeSites(sraw ?? []);
-          setSites(slist);
-          const preferred =
-            slist.find(s => /king'?s?\s+chamber/i.test(s)) ||
-            slist.find(s => /great.*pyramid/i.test(s)) ||
-            slist[0] || "";
-          setSite(preferred);
-        } catch (e) {
-          console.error(e);
-          setError("Unable to load countries/sites.");
-          setCountries([]); setSites([]);
-        } finally {
-          setLoading(false);
-        }
-      };
-      init();
-      return () => { handleClose(); };
-    }, []);
-
-    // Fetch meta + image when site changes
-    useEffect(() => {
-      let alive = true;
-      const run = async () => {
-        if (!site) return;
-        try {
-          setLoading(true); setError("");
-          const [infoRes, imgRes] = await Promise.all([
-            fetch(ENDPOINTS.siteInfo(site)),
-            fetch(ENDPOINTS.siteImage(site))
-          ]);
-          let infoRaw=null, imgRaw=null;
-          try { infoRaw = await infoRes.json(); } catch {}
-          try { imgRaw = await imgRes.json(); } catch {}
-          if (!alive) return;
-          setSiteInfo(normalizeSiteInfo(infoRaw || {}));
-          setImageUrl(normalizeImage(imgRaw || "") || "");
-        } catch (e) {
-          console.error(e);
-          setError("Failed to load site information.");
-        } finally {
-          setLoading(false);
-        }
-      };
-      run();
-      return () => { alive = false; };
-    }, [site]);
-
-    // Reload sites when country changes
-    useEffect(() => {
-      let alive = true;
-      const run = async () => {
-        if (!country) return;
-        try {
-          setLoading(true); setError("");
-          const sres = await fetch(ENDPOINTS.sitesForCountry(country));
-          let sraw=null; try { sraw = await sres.json(); } catch {}
-          if (!alive) return;
-          const slist = normalizeSites(sraw ?? []);
-          setSites(slist);
-          setSite(slist[0] || "");
-        } catch (e) {
-          console.error(e);
-          setError("Failed to load sites for country.");
-        } finally {
-          setLoading(false);
-        }
-      };
-      run();
-      return () => { alive = false; };
-    }, [country]);
-
-    const stopOtherAudio = () => {
-      try { window.parent.postMessage({ type: "pemf_stop_all_audio" }, "*"); } catch {}
+    const ENDPOINTS = {
+      countries: API_BASE + "/countries",
+      sitesForCountry: (c) => API_BASE + "/sites-for-country?country=" + encodeURIComponent(c),
+      siteInfo: (s) => API_BASE + "/site-info?site=" + encodeURIComponent(s),
+      siteImage: (s) => API_BASE + "/site-image?site=" + encodeURIComponent(s),
+      genIR: API_BASE + "/generate-ir"
     };
 
-    const tick = () => {
-      if (!irEngineRef.current) return;
-      const eg = irEngineRef.current;
-      const ctx = eg.context;
-      const t = ctx ? (ctx.currentTime - eg.startedAt) : 0;
-      setCurrentTime(Math.min(totalTime, t));
-      if (t >= totalTime) {
-        if (eg.loop) {
-          handlePause(false); handlePlay(false);
-        } else {
-          handlePause();
-        }
+    // ================= UTIL =================
+    const pad = (n) => (n < 10 ? "0" + n : "" + n);
+    const fmtTime = (s) => {
+      s = Math.max(0, Math.floor(s));
+      const m = Math.floor(s / 60), r = s % 60;
+      return m + ":" + pad(r);
+    };
+    async function safeJSON(res) {
+      try { return await res.json(); } catch (e) {
+        try { return await res.text(); } catch { return null; }
       }
+    }
+    const toArray = (data, preferredKeys = []) => {
+      if (Array.isArray(data)) return data;
+      if (data && typeof data === "object") {
+        for (const k of preferredKeys) if (Array.isArray(data[k])) return data[k];
+        const firstArr = Object.values(data).find((v) => Array.isArray(v));
+        if (firstArr) return firstArr;
+      }
+      if (typeof data === "string") {
+        const parts = data.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
+        if (parts.length) return parts;
+      }
+      return [];
+    };
+    const normalizeCountries = (raw) =>
+      toArray(raw, ["countries", "items", "data", "list"])
+        .map((x) => typeof x === "string" ? x : (x?.name || x?.title || x?.country || ""))
+        .filter(Boolean);
+
+    const normalizeSites = (raw) =>
+      toArray(raw, ["sites", "items", "data", "list"])
+        .map((x) => typeof x === "string" ? x : (x?.name || x?.title || x?.site || ""))
+        .filter(Boolean);
+
+    const normalizeSiteInfo = (raw) => {
+      const d = raw && typeof raw === "object" && raw.info && typeof raw.info === "object" ? raw.info : (raw || {});
+      return {
+        region: d.region || "",
+        description: d.description || d.text || "",
+        health_benefits: d.health_benefits || d.benefits || "",
+        who_is_this_for: d.who_is_this_for || d.who || d.audience || "",
+        disclaimer: d.disclaimer || d.notes || ""
+      };
     };
 
-    const handlePlay = async (sendStop = true) => {
-      if (!site) return;
-      if (sendStop) stopOtherAudio();
-      setPlayerOpen(true); setError("");
-      try {
-        setLoading(true);
-        if (irEngineRef.current){ irEngineRef.current.stop(); irEngineRef.current = null; }
-        irEngineRef.current = new IREngine();
-        const eg = irEngineRef.current;
-        eg.loop = loop; eg.durationSec = totalTime; eg.onUpdate = tick; eg.setVolume(volume);
+    const normalizeImage = (raw) => {
+      if (!raw) return "";
+      if (typeof raw === "string") return raw;
+      return raw.url || raw.image || raw.src || "";
+    };
 
-        const resp = await fetch(ENDPOINTS.genIR, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ site })
-        });
-        let json=null; try { json = await resp.json(); } catch {}
-        const programHints = {
-          base_hz: json?.base_hz ?? json?.carrier_hz,
-          binaural_split_hz: json?.binaural_split_hz,
-          isotonic_rate_hz: json?.isotonic_rate_hz,
-          pink_noise_gain: json?.source_noise_gain
+    // ================= AUDIO ENGINE (Web Audio) =================
+    function clamp01(v){ return Math.max(0, Math.min(1, v)); }
+
+    class IREngine {
+      constructor() {
+        this.context = null;
+        this.master = null;
+        this.nodes = null;
+        this.loop = false;
+        this.durationSec = 0;
+        this.startedAt = 0;
+        this.onUpdate = () => {};
+        this._raf = null;
+        this.defaultProgram = {
+          base_hz: 200,
+          binaural_split_hz: 4,
+          isotonic_rate_hz: 0.25,
+          pink_noise_gain: 0.0
         };
-        await eg.loadAndStart(json || {}, programHints);
-        setIsPlaying(true);
-      } catch (e) {
-        console.error(e);
-        setError("IR synthesis failed.");
-      } finally { setLoading(false); }
-    };
-
-    const handlePause = (collapse = false) => {
-      if (irEngineRef.current) irEngineRef.current.stop();
-      setIsPlaying(false);
-      if (collapse){ setPlayerOpen(false); setCurrentTime(0); }
-    };
-    const handleClose = () => { handlePause(true); };
-
-    const onSeek = (v) => {
-      const t = Number(v);
-      if (irEngineRef.current && isFinite(t)) {
-        const eg = irEngineRef.current, ctx = eg.context;
-        eg.startedAt = ctx.currentTime - Math.min(totalTime, Math.max(0, t));
-        setCurrentTime(t);
       }
-    };
-    const onToggleLoop = () => {
-      setLoop(v => {
-        const next = !v;
-        if (irEngineRef.current) irEngineRef.current.loop = next;
-        return next;
-      });
-    };
-    const onVolume = (v) => {
-      const val = Number(v); setVolume(val);
-      if (irEngineRef.current) irEngineRef.current.setVolume(val);
-    };
 
-    const onChangeCountry = (e) => setCountry(e.target.value);
-    const onChangeSite = (e) => setSite(e.target.value);
+      async ensure() {
+        if (!this.context) {
+          const AC = window.AudioContext || window.webkitAudioContext;
+          this.context = new AC({ latencyHint: "playback" });
+          this.master = this.context.createGain();
+          this.master.gain.value = 0.9;
+          this.master.connect(this.context.destination);
 
-    const minuteOptions = [15, 36, 45];
+          // Background playback support
+          document.addEventListener("visibilitychange", () => {
+            if (document.visibilityState === "visible" && this.context.state !== "running") {
+              this.context.resume();
+            }
+          }, { passive: true });
+        }
+        if (this.context.state === "suspended") await this.context.resume();
+      }
 
-    // Render
-    const countriesSafe = Array.isArray(countries) ? countries : [];
-    const sitesSafe = Array.isArray(sites) ? sites : [];
+      setVolume(v) { if (this.master) this.master.gain.setTargetAtTime(v, this.context.currentTime, 0.01); }
 
-    return (
-      React.createElement(React.Fragment, null,
-        React.createElement("div",{className:"container"},
-          React.createElement("div",{className:"header"},
-            React.createElement("div",{className:"brand"},"Sanctra • Sacred IR"),
-            React.createElement("div",{className:"muted"},"Mobile-first • Binaural • Isotonic • Convolution")
-          ),
+      stop() {
+        if (this.nodes) {
+          const { oscL, oscR, mod, noiseSrc } = this.nodes;
+          try { oscL.stop(); } catch {}
+          try { oscR.stop(); } catch {}
+          try { mod.stop(); } catch {}
+          try { noiseSrc && noiseSrc.stop(); } catch {}
+        }
+        this.nodes = null;
+        cancelAnimationFrame(this._raf);
+        this._raf = null;
+      }
 
-          React.createElement("div",{className:"dropdowns"},
-            React.createElement("div",{className:"selectWrap"},
-              React.createElement("select",{className:"select",value:country,onChange:onChangeCountry},
-                countriesSafe.map(c=>React.createElement("option",{key:c,value:c},c))
-              ),
-              React.createElement("span",{className:"arrow"})
+      // Build stereo IR buffer from JSON fields: early_reflection_taps, modal_summary, rt60_s_by_band, etc.
+      async buildIRBuffer(irJson) {
+        await this.ensure();
+        const ctx = this.context, sr = ctx.sampleRate;
+
+        const taps = Array.isArray(irJson?.early_reflection_taps) ? irJson.early_reflection_taps : [];
+        const modes = Array.isArray(irJson?.modal_summary) ? irJson.modal_summary : [];
+        const bands = Array.isArray(irJson?.rt60_s_by_band) ? irJson.rt60_s_by_band : [];
+        const preDelay = Math.max(0, irJson?.pre_delay_s || 0);
+        const stereoWidth = clamp01(irJson?.stereo_width ?? 0.65);
+        const earlyLateBalance = clamp01(irJson?.early_late_balance ?? 0.5);
+        const noiseTailGain = clamp01(irJson?.noise_tail_gain ?? 0.0);
+        const hfRolloffHz = Math.max(0, irJson?.hf_rolloff_hz || 0);
+        const lfeGain = clamp01(irJson?.lfe_gain ?? 0.0);
+
+        const TAU = Math.PI * 2;
+        const lastTap = taps.reduce((m, t) => Math.max(m, t.time_s || 0), 0);
+        const maxRT = bands.reduce((m, b) => Math.max(m, b.rt60_s || 0), 0) || 2.0;
+        const irLenSec = Math.min(12.0, Math.max(2.5, preDelay + lastTap + 1.8 * (maxRT || 2.0)));
+        const length = Math.floor(irLenSec * sr);
+        const ir = ctx.createBuffer(2, length, sr);
+        const L = ir.getChannelData(0), R = ir.getChannelData(1);
+        const preN = Math.floor(preDelay * sr);
+
+        // Early reflections
+        const earlyScale = 1 - earlyLateBalance;
+        taps.forEach((t) => {
+          const n = Math.min(length - 1, Math.max(0, preN + Math.floor((t.time_s || 0) * sr)));
+          const baseL = (t.gain_l ?? t.gain ?? 0) * earlyScale;
+          const baseR = (t.gain_r ?? t.gain ?? 0) * earlyScale;
+          const cross = (1 - stereoWidth) * 0.5;
+          L[n] += baseL * (1 - cross) + baseR * cross;
+          R[n] += baseR * (1 - cross) + baseL * cross;
+        });
+
+        // Late reverb from modal_summary with RT60 per nearest band
+        const itdl = Math.floor(0.0006 * sr) * stereoWidth; // small interaural delay
+        const rt60ToLambda = (rt60_s) => Math.log(0.001) / Math.max(1, rt60_s * sr);
+        const lpAlpha = hfRolloffHz > 0 ? Math.exp(-TAU * hfRolloffHz / sr) : 0.0;
+
+        modes.forEach((m) => {
+          const f = Math.max(20, m.freq_hz || 200);
+          const gBase = m.gain == null ? 0.5 : m.gain;
+          let rt60 = maxRT || 2.0;
+          if (bands.length) {
+            let nearest = bands[0], d = Math.abs(f - bands[0].center_hz);
+            for (let i = 1; i < bands.length; i++) {
+              const di = Math.abs(f - bands[i].center_hz);
+              if (di < d) { d = di; nearest = bands[i]; }
+            }
+            rt60 = Math.max(0.25, nearest.rt60_s || rt60);
+          }
+          const lambda = rt60ToLambda(rt60);
+          const w = TAU * f / sr;
+          const ph = Math.random() * TAU;
+          const lateScale = earlyLateBalance;
+          let yl = 0, yr = 0;
+          for (let n = 0; n < length; n++) {
+            const env = Math.exp(n * lambda);
+            let s = env * Math.sin(w * n + ph) * gBase * lateScale;
+            if (hfRolloffHz > 0) {
+              yl = lpAlpha * yl + (1 - lpAlpha) * s;
+              yr = lpAlpha * yr + (1 - lpAlpha) * s;
+            } else { yl = s; yr = s; }
+            const li = n, ri = Math.min(length - 1, (n + itdl) | 0);
+            L[li] += yl; R[ri] += yr;
+          }
+        });
+
+        // LFE enrichment
+        if (lfeGain > 0) {
+          let al = 0, ar = 0; const k = 0.0005 * lfeGain;
+          for (let n = 0; n < length; n++) {
+            al = (1 - k) * al + k * L[n];
+            ar = (1 - k) * ar + k * R[n];
+            L[n] += al * 0.3 * lfeGain;
+            R[n] += ar * 0.3 * lfeGain;
+          }
+        }
+
+        // Noise tail
+        if (noiseTailGain > 0) {
+          let b0=0, b1=0, b2=0;
+          for (let n = 0; n < length; n++) {
+            const whiteL = Math.random() * 2 - 1;
+            const whiteR = Math.random() * 2 - 1;
+            b0 = 0.997 * b0 + 0.003 * whiteL;
+            b1 = 0.985 * b1 + 0.015 * whiteR;
+            b2 = 0.950 * b2 + 0.050 * ((whiteL + whiteR) / 2);
+            L[n] += (b0 + b2) * 0.5 * noiseTailGain;
+            R[n] += (b1 + b2) * 0.5 * noiseTailGain;
+          }
+        }
+
+        // Fade + normalize
+        const fade = Math.min(Math.floor(length * 0.12), Math.floor(0.8 * sr));
+        let peak = 0;
+        for (let n = 0; n < length; n++) {
+          if (n > length - fade) {
+            const t = (n - (length - fade)) / fade;
+            const w = 1 - t; L[n] *= w; R[n] *= w;
+          }
+          peak = Math.max(peak, Math.abs(L[n]), Math.abs(R[n]));
+        }
+        const norm = peak > 0 ? Math.min(0.95 / peak, 1) : 1;
+        for (let n = 0; n < length; n++) { L[n] *= norm; R[n] *= norm; }
+
+        return ir;
+      }
+
+      createProgramNodes(irBuffer, programHints = {}) {
+        const ctx = this.context;
+        const program = {
+          base_hz: programHints.base_hz ?? this.defaultProgram.base_hz,
+          binaural_split_hz: programHints.binaural_split_hz ?? this.defaultProgram.binaural_split_hz,
+          isotonic_rate_hz: programHints.isotonic_rate_hz ?? this.defaultProgram.isotonic_rate_hz,
+          pink_noise_gain: programHints.pink_noise_gain ?? this.defaultProgram.pink_noise_gain
+        };
+
+        const convolver = ctx.createConvolver();
+        convolver.normalize = true;
+        convolver.buffer = irBuffer;
+
+        const merger = ctx.createChannelMerger(2);
+        const wetGain = ctx.createGain(); wetGain.gain.value = 1.0;
+        const dryGain = ctx.createGain(); dryGain.gain.value = 0.0;
+
+        // Stereo carrier oscillators, binaural split
+        const oscL = ctx.createOscillator(); const oscR = ctx.createOscillator();
+        oscL.type = "sine"; oscR.type = "sine";
+        const split = Math.max(0, program.binaural_split_hz);
+        oscL.frequency.value = Math.max(20, program.base_hz - split / 2);
+        oscR.frequency.value = Math.max(20, program.base_hz + split / 2);
+
+        // Isotonic amplitude modulation
+        const mod = ctx.createOscillator(); mod.type = "sine";
+        mod.frequency.value = Math.max(0.05, program.isotonic_rate_hz);
+        const modGL = ctx.createGain(); modGL.gain.value = 0.35;
+        const modGR = ctx.createGain(); modGR.gain.value = 0.35;
+        const ampL = ctx.createGain(); ampL.gain.value = 0.6;
+        const ampR = ctx.createGain(); ampR.gain.value = 0.6;
+
+        oscL.connect(ampL); oscR.connect(ampR);
+        mod.connect(modGL); mod.connect(modGR);
+        modGL.connect(ampL.gain); modGR.connect(ampR.gain);
+
+        ampL.connect(merger, 0, 0);
+        ampR.connect(merger, 0, 1);
+
+        // Optional pink noise bed
+        let noiseSrc = null;
+        if (program.pink_noise_gain > 0) {
+          const noiseBuf = makeLoopedPinkNoise(ctx, 3.0);
+          const nGain = ctx.createGain(); nGain.gain.value = program.pink_noise_gain;
+          noiseSrc = ctx.createBufferSource(); noiseSrc.buffer = noiseBuf; noiseSrc.loop = true;
+          noiseSrc.connect(nGain).connect(merger);
+        }
+
+        // Route through convolver to master
+        merger.connect(convolver);
+        merger.connect(dryGain).connect(this.master);
+        convolver.connect(wetGain).connect(this.master);
+
+        this.nodes = { oscL, oscR, mod, ampL, ampR, merger, convolver, wetGain, dryGain, noiseSrc };
+      }
+
+      async loadAndStart(irJson, programHints = {}) {
+        await this.ensure();
+        const irBuffer = await this.buildIRBuffer(irJson);
+        this.createProgramNodes(irBuffer, programHints);
+        const { oscL, oscR, mod, noiseSrc } = this.nodes;
+        if (noiseSrc) noiseSrc.start();
+        oscL.start(); oscR.start(); mod.start();
+        this.startedAt = this.context.currentTime;
+        const tick = () => { this.onUpdate(); this._raf = requestAnimationFrame(tick); };
+        this._raf = requestAnimationFrame(tick);
+      }
+    }
+
+    function makeLoopedPinkNoise(ctx, seconds) {
+      const len = Math.max(1, Math.floor(ctx.sampleRate * seconds));
+      const buf = ctx.createBuffer(2, len, ctx.sampleRate);
+      for (let ch = 0; ch < 2; ch++) {
+        const data = buf.getChannelData(ch);
+        let b0=0, b1=0, b2=0;
+        for (let i = 0; i < len; i++) {
+          const white = Math.random() * 2 - 1;
+          b0 = 0.997 * b0 + 0.003 * white;
+          b1 = 0.985 * b1 + 0.015 * white;
+          b2 = 0.950 * b2 + 0.050 * white;
+          data[i] = (b0 + b1 + b2) / 3;
+        }
+      }
+      return buf;
+    }
+
+    // =================== React App ===================
+    function App() {
+      const [countries, setCountries] = useState([]);      // Arrays only
+      const [country, setCountry] = useState("Egypt");
+      const [sites, setSites] = useState([]);
+      const [site, setSite] = useState("");
+      const [siteInfo, setSiteInfo] = useState(null);
+      const [imageUrl, setImageUrl] = useState("");
+      const [minutes, setMinutes] = useState(15);          // 15 | 36 | 45
+      const [loading, setLoading] = useState(false);
+      const [error, setError] = useState("");
+
+      const [playerOpen, setPlayerOpen] = useState(false);
+      const [isPlaying, setIsPlaying] = useState(false);
+      const [loop, setLoop] = useState(false);
+      const [volume, setVolume] = useState(0.9);
+      const [currentTime, setCurrentTime] = useState(0);
+      const totalTime = minutes * 60;
+
+      const irEngineRef = useRef(null);
+
+      // Default load: Egypt + King's Chamber or Great Pyramid
+      useEffect(() => {
+        let alive = true;
+        const init = async () => {
+          try {
+            setLoading(true); setError("");
+
+            const res = await fetch(ENDPOINTS.countries);
+            const countriesRaw = await safeJSON(res);
+            const list = normalizeCountries(countriesRaw);
+            const defaultCountry = list.includes("Egypt") ? "Egypt" : (list[0] || "Egypt");
+            if (!alive) return;
+            setCountries(list);
+            setCountry(defaultCountry);
+
+            const sres = await fetch(ENDPOINTS.sitesForCountry(defaultCountry));
+            const sraw = await safeJSON(sres);
+            const slist = normalizeSites(sraw);
+            const preferred =
+              slist.find((s) => /king'?s?\s+chamber/i.test(s)) ||
+              slist.find((s) => /great.*pyramid/i.test(s)) ||
+              slist[0] || "";
+            if (!alive) return;
+            setSites(slist);
+            setSite(preferred);
+          } catch (e) {
+            console.error(e);
+            if (!alive) return;
+            setError("Unable to load countries or sites.");
+            setCountries([]); setSites([]);
+          } finally { if (alive) setLoading(false); }
+        };
+        init();
+        return () => { alive = false; handleClose(); };
+      }, []);
+
+      // Fetch meta + image when site changes
+      useEffect(() => {
+        let alive = true;
+        const run = async () => {
+          if (!site) return;
+          try {
+            setLoading(true); setError("");
+            const [infoRes, imgRes] = await Promise.all([
+              fetch(ENDPOINTS.siteInfo(site)),
+              fetch(ENDPOINTS.siteImage(site))
+            ]);
+            const infoRaw = await safeJSON(infoRes);
+            const imgRaw = await safeJSON(imgRes);
+            if (!alive) return;
+            setSiteInfo(normalizeSiteInfo(infoRaw));
+            setImageUrl(normalizeImage(imgRaw) || "");
+          } catch (e) {
+            console.error(e);
+            if (!alive) return;
+            setError("Failed to load site information.");
+          } finally { if (alive) setLoading(false); }
+        };
+        run();
+        return () => { alive = false; };
+      }, [site]);
+
+      // Reload sites when country changes
+      useEffect(() => {
+        let alive = true;
+        const run = async () => {
+          if (!country) return;
+          try {
+            setLoading(true); setError("");
+            const sres = await fetch(ENDPOINTS.sitesForCountry(country));
+            const sraw = await safeJSON(sres);
+            if (!alive) return;
+            const slist = normalizeSites(sraw);
+            setSites(slist);
+            setSite(slist[0] || "");
+          } catch (e) {
+            console.error(e);
+            if (!alive) return;
+            setError("Failed to load sites for country.");
+          } finally { if (alive) setLoading(false); }
+        };
+        run();
+        return () => { alive = false; };
+      }, [country]);
+
+      const stopOtherAudio = () => {
+        try { window.parent.postMessage({ type: "pemf_stop_all_audio" }, "*"); } catch {}
+      };
+
+      const tick = () => {
+        const eg = irEngineRef.current;
+        if (!eg || !eg.context) return;
+        const t = eg.context.currentTime - eg.startedAt;
+        setCurrentTime(Math.min(totalTime, t));
+        if (t >= totalTime) {
+          if (eg.loop) {
+            handlePause(false); handlePlay(false);
+          } else {
+            handlePause();
+          }
+        }
+      };
+
+      const handlePlay = async (sendStop = true) => {
+        if (!site) return;
+        if (sendStop) stopOtherAudio();
+        setPlayerOpen(true); setError("");
+
+        try {
+          setLoading(true);
+
+          if (irEngineRef.current) { irEngineRef.current.stop(); irEngineRef.current = null; }
+          irEngineRef.current = new IREngine();
+          const eg = irEngineRef.current;
+          eg.loop = loop; eg.durationSec = totalTime; eg.onUpdate = tick; eg.setVolume(volume);
+
+          // Use all data from generate-ir
+          const resp = await fetch(ENDPOINTS.genIR, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ site, minutes })
+          });
+          const json = await safeJSON(resp);
+
+          const programHints = {
+            base_hz: json?.base_hz ?? json?.carrier_hz ?? json?.program?.base_hz,
+            binaural_split_hz: json?.binaural_split_hz ?? json?.program?.binaural_split_hz,
+            isotonic_rate_hz: json?.isotonic_rate_hz ?? json?.program?.isotonic_rate_hz,
+            pink_noise_gain: json?.source_noise_gain ?? json?.program?.pink_noise_gain
+          };
+
+          await eg.loadAndStart(json || {}, programHints);
+          setIsPlaying(true);
+        } catch (e) {
+          console.error(e);
+          setError("IR synthesis failed.");
+        } finally { setLoading(false); }
+      };
+
+      const handlePause = (collapse = false) => {
+        if (irEngineRef.current) irEngineRef.current.stop();
+        setIsPlaying(false);
+        if (collapse) { setPlayerOpen(false); setCurrentTime(0); }
+      };
+      const handleClose = () => { handlePause(true); };
+
+      const onSeek = (v) => {
+        const t = Number(v);
+        if (irEngineRef.current && isFinite(t)) {
+          const eg = irEngineRef.current, ctx = eg.context;
+          eg.startedAt = ctx.currentTime - Math.min(totalTime, Math.max(0, t));
+          setCurrentTime(t);
+        }
+      };
+      const onToggleLoop = () => {
+        setLoop((v) => {
+          const next = !v;
+          if (irEngineRef.current) irEngineRef.current.loop = next;
+          return next;
+        });
+      };
+      const onVolume = (v) => {
+        const val = Number(v); setVolume(val);
+        if (irEngineRef.current) irEngineRef.current.setVolume(val);
+      };
+
+      const onChangeCountry = (e) => setCountry(e.target.value);
+      const onChangeSite = (e) => setSite(e.target.value);
+
+      const minuteOptions = [15, 36, 45];
+
+      // Safe arrays for rendering
+      const countriesSafe = Array.isArray(countries) ? countries : normalizeCountries(countries);
+      const sitesSafe = Array.isArray(sites) ? sites : normalizeSites(sites);
+
+      return (
+        React.createElement(React.Fragment, null,
+          React.createElement("div", { className: "container" },
+            React.createElement("div", { className: "header" },
+              React.createElement("div", { className: "brand" }, "Sanctra • Sacred IR"),
+              React.createElement("div", { className: "muted" }, "Mobile-first • Binaural • Isotonic • Convolution")
             ),
-            React.createElement("div",{className:"selectWrap"},
-              React.createElement("select",{className:"select",value:site,onChange:onChangeSite},
-                sitesSafe.map(s=>React.createElement("option",{key:s,value:s},s))
-              ),
-              React.createElement("span",{className:"arrow"})
-            )
-          ),
 
-          React.createElement("div",{className:"card"},
-            React.createElement("div",{className:"hero"},
-              imageUrl
-                ? React.createElement("img",{src:imageUrl,alt:site})
-                : React.createElement("div",{className:"loading"},
-                    React.createElement("div",{className:"spinner"}),"Loading image…"
-                  ),
-              React.createElement("button",{
-                className:"playOverlay",
-                onClick: isPlaying ? ()=>handlePause(false) : ()=>handlePlay(true),
-                title: isPlaying ? "Pause" : "Play",
-                "aria-label": isPlaying ? "Pause" : "Play"
-              }, React.createElement("div",{className:"playIcon"}))
-            ),
-
-            React.createElement("div",{className:"controlsRow"},
-              React.createElement("div",{className:"seg"},
-                minuteOptions.map(min =>
-                  React.createElement("button",{
-                    key:min,
-                    className: "pill " + (minutes===min?"active":""),
-                    onClick:()=> setMinutes(min)
-                  }, `${min} min`)
-                )
+            React.createElement("div", { className: "dropdowns" },
+              React.createElement("div", { className: "selectWrap" },
+                React.createElement("select", { className: "select", value: country, onChange: onChangeCountry },
+                  countriesSafe.map((c) => React.createElement("option", { key: String(c), value: String(c) }, String(c)))
+                ),
+                React.createElement("span", { className: "arrow" })
               ),
-              React.createElement("div",{className:"segRight"},
-                loading
-                  ? React.createElement("div",{className:"loading"},
-                      React.createElement("div",{className:"spinner"}),"Fetching data…"
-                    )
-                  : null
+              React.createElement("div", { className: "selectWrap" },
+                React.createElement("select", { className: "select", value: site, onChange: onChangeSite },
+                  sitesSafe.map((s) => React.createElement("option", { key: String(s), value: String(s) }, String(s)))
+                ),
+                React.createElement("span", { className: "arrow" })
               )
             ),
 
-            React.createElement("div",{className:"section"},
-              React.createElement("h3",null,"Country"),
-              React.createElement("p",null, country || "")
-            ),
-            React.createElement("div",{className:"section"},
-              React.createElement("h3",null,"Site Information"),
-              siteInfo ? React.createElement("p",null, siteInfo.description || "—")
-                       : React.createElement("p",{className:"muted"},"Loading…")
-            ),
-            React.createElement("div",{className:"section"},
-              React.createElement("h3",null,"Site Benefits"),
-              siteInfo ? React.createElement("p",null, siteInfo.health_benefits || "—")
-                       : React.createElement("p",{className:"muted"},"Loading…")
-            ),
-            React.createElement("div",{className:"section"},
-              React.createElement("h3",null,"Who is this for"),
-              siteInfo ? React.createElement("p",null, siteInfo.who_is_this_for || "—")
-                       : React.createElement("p",{className:"muted"},"Loading…")
-            ),
-            React.createElement("div",{className:"section"},
-              React.createElement("h3",null,"Disclaimer"),
-              siteInfo
-                ? React.createElement("p",{className:"fineprint"}, siteInfo.disclaimer || "—")
-                : React.createElement("p",{className:"fineprint"},"Loading…")
-            ),
-            error && React.createElement("div",{className:"section"},
-              React.createElement("div",{className:"error"}, error)
-            )
-          )
-        ),
-
-        React.createElement("div",{className:"player "+(playerOpen?"open":"")},
-          React.createElement("div",{className:"playerInner"},
-            React.createElement("div",{className:"playerRow"},
-              React.createElement("img",{src:imageUrl,className:"thumb",alt:""}),
-              React.createElement("div",null,
-                React.createElement("div",{className:"title"},
-                  `Country: ${country || "—"} · Site: ${site || "—"}`
-                )
-              )
-            ),
-            React.createElement("div",{className:"playerCtrls"},
-              React.createElement("button",{className:"iconBtn",onClick:isPlaying?()=>handlePause(false):()=>handlePlay(true), title:isPlaying?"Pause":"Play"},
-                isPlaying ? "❚❚" : "▶"
+            React.createElement("div", { className: "card" },
+              React.createElement("div", { className: "hero" },
+                imageUrl
+                  ? React.createElement("img", { src: imageUrl, alt: site })
+                  : React.createElement("div", { className: "loading" },
+                      React.createElement("div", { className: "spinner" }), "Loading image…"
+                    ),
+                React.createElement("button", {
+                  className: "playOverlay",
+                  onClick: isPlaying ? () => handlePause(false) : () => handlePlay(true),
+                  title: isPlaying ? "Pause" : "Play",
+                  "aria-label": isPlaying ? "Pause" : "Play"
+                }, React.createElement("div", { className: "playIcon" }))
               ),
-              React.createElement("button",{className:"iconBtn "+(loop?"active":""), onClick:()=>setLoop(v=>!v), title:"Loop"},"∞"),
-              React.createElement("input",{className:"vol",type:"range",min:"0",max:"1",step:"0.01",value:volume,onChange:(e)=>onVolume(e.target.value),title:"Volume","aria-label":"Volume"}),
-              React.createElement("button",{className:"iconBtn closeBtn",onClick:handleClose,title:"Close"},"✕")
-            ),
-            React.createElement("div",{className:"bar"},
-              React.createElement("input",{className:"progress",type:"range",min:"0",max:String(totalTime),step:"1",value:String(Math.min(currentTime,totalTime)),onChange:(e)=>onSeek(e.target.value)}),
-              React.createElement("div",{className:"timeRow"},
-                React.createElement("div",null, fmtTime(currentTime)),
-                React.createElement("div",null, fmtTime(totalTime))
+
+              React.createElement("div", { className: "controlsRow" },
+                React.createElement("div", { className: "seg" },
+                  minuteOptions.map((min) =>
+                    React.createElement("button", {
+                      key: min,
+                      className: "pill " + (minutes === min ? "active" : ""),
+                      onClick: () => { if (!isPlaying) setMinutes(min); }
+                    }, `${min} min`)
+                  )
+                ),
+                React.createElement("div", { className: "segRight" },
+                  loading
+                    ? React.createElement("div", { className: "loading" },
+                        React.createElement("div", { className: "spinner" }), "Fetching data…"
+                      )
+                    : null
+                )
+              ),
+
+              React.createElement("div", { className: "section" },
+                React.createElement("h3", null, "Country"),
+                React.createElement("p", null, country || "")
+              ),
+              React.createElement("div", { className: "section" },
+                React.createElement("h3", null, "Site Information"),
+                siteInfo ? React.createElement("p", null, siteInfo.description || "—")
+                         : React.createElement("p", { className: "muted" }, "Loading…")
+              ),
+              React.createElement("div", { className: "section" },
+                React.createElement("h3", null, "Site Benefits"),
+                siteInfo ? React.createElement("p", null, siteInfo.health_benefits || "—")
+                         : React.createElement("p", { className: "muted" }, "Loading…")
+              ),
+              React.createElement("div", { className: "section" },
+                React.createElement("h3", null, "Who is this for"),
+                siteInfo ? React.createElement("p", null, siteInfo.who_is_this_for || "—")
+                         : React.createElement("p", { className: "muted" }, "Loading…")
+              ),
+              React.createElement("div", { className: "section" },
+                React.createElement("h3", null, "Disclaimer"),
+                siteInfo
+                  ? React.createElement("p", { className: "fineprint" }, siteInfo.disclaimer || "—")
+                  : React.createElement("p", { className: "fineprint" }, "Loading…")
+              ),
+              error && React.createElement("div", { className: "section" },
+                React.createElement("div", { className: "error" }, error)
+              )
+            )
+          ),
+
+          React.createElement("div", { className: "player " + (playerOpen ? "open" : "") },
+            React.createElement("div", { className: "playerInner" },
+              React.createElement("div", { className: "playerRow" },
+                React.createElement("img", { src: imageUrl, className: "thumb", alt: "" }),
+                React.createElement("div", null,
+                  React.createElement("div", { className: "title" },
+                    `Country: ${country || "—"} · Site: ${site || "—"}`
+                  )
+                )
+              ),
+              React.createElement("div", { className: "playerCtrls" },
+                React.createElement("button", { className: "iconBtn", onClick: isPlaying ? () => handlePause(false) : () => handlePlay(true), title: isPlaying ? "Pause" : "Play" },
+                  isPlaying ? "❚❚" : "▶"
+                ),
+                React.createElement("button", { className: "iconBtn " + (loop ? "active" : ""), onClick: onToggleLoop, title: "Loop" }, "∞"),
+                React.createElement("input", { className: "vol", type: "range", min: "0", max: "1", step: "0.01", value: volume, onChange: (e) => onVolume(e.target.value), title: "Volume", "aria-label": "Volume" }),
+                React.createElement("button", { className: "iconBtn closeBtn", onClick: handleClose, title: "Close" }, "✕")
+              ),
+              React.createElement("div", { className: "bar" },
+                React.createElement("input", { className: "progress", type: "range", min: "0", max: String(totalTime), step: "1", value: String(Math.min(currentTime, totalTime)), onChange: (e) => onSeek(e.target.value) }),
+                React.createElement("div", { className: "timeRow" },
+                  React.createElement("div", null, fmtTime(currentTime)),
+                  React.createElement("div", null, fmtTime(totalTime))
+                )
               )
             )
           )
         )
-      )
-    );
-  }
+      );
+    }
 
-  ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
-</script>
-
-  </body>
+    ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+  </script>
+</body>
 </html>
