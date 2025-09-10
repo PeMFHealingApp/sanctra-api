@@ -10,6 +10,8 @@
   --danger:#ff4d4d;
 }
 
+html, body { touch-action: manipulation; }  /* helps block double-tap zoom on many browsers */
+
 *{ box-sizing:border-box; }
 html,body{ margin:0; height:100%; background:var(--bg); color:var(--text); font-family:'Quicksand',system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial; }
 a{ color:inherit; text-decoration:none; }
