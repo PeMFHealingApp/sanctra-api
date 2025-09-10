@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <!-- disable zoom/pinch -->
+  <!-- Disable pinch/zoom -->
   <meta name="viewport"
         content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
   <meta name="robots" content="noindex,nofollow" />
@@ -18,15 +18,13 @@
   <link rel="icon" href="./favicon.ico?v=2" type="image/x-icon" sizes="any">
 
   <meta name="theme-color" content="#0b0b0b" />
-
-  <!-- Your CSS (unchanged) -->
   <link rel="stylesheet" href="style.css?v=2025-09-07-8" />
 </head>
 
 <body>
   <div id="root"></div>
 
-  <!-- Hidden focus clip: REQUIRED for background keep-alive / audio focus -->
+  <!-- Silent clip to claim audio focus (used on both, paused immediately) -->
   <audio id="pemfFocus" src="./silence.mp3" preload="auto" playsinline style="display:none"></audio>
 
   <!-- React -->
@@ -35,6 +33,7 @@
 
   <script>
   const { useEffect, useRef, useState } = React;
+  const IS_ANDROID = /Android/i.test(navigator.userAgent);
 
   // ---------------- CONFIG ----------------
   const apiOverride = new URLSearchParams(location.search).get("api");
@@ -100,13 +99,13 @@
   }
   const normalizeInfo = raw => {
     const d = raw?.info && typeof raw.info === "object" ? raw.info : (raw || {});
-    const desc = d.description || d.text || pickByRegex(d, /(overview|about|description)/i);
+    theDesc = d.description || d.text || pickByRegex(d, /(overview|about|description)/i);
     const why = d.why_sacred || d.why || d.why_is_this_sacred || d.why_this_is_sacred || pickByRegex(d, /(why).*sacred/i);
     const who = d.who_is_this_for || d.who || d.audience || d.target_audience || d.for_whom || pickByRegex(d, /(who).*for|audience/i);
     const benefits = d.health_benefits || d.benefits || pickByRegex(d, /(benefit)/i);
     return {
       region: d.region || "",
-      description: desc || "",
+      description: theDesc || "",
       why_sacred: why || "",
       health_benefits: benefits || "",
       who_is_this_for: who || "",
@@ -122,14 +121,13 @@
     } catch {}
   }
 
-  // Claim native audio focus using the silent clip (must run in a user gesture)
   async function requestAudioFocus() {
     const el = document.getElementById('pemfFocus');
     if (!el) return;
     try {
       el.currentTime = 0;
       await el.play();
-      setTimeout(()=>{ try { el.pause(); } catch{} }, 1200);
+      setTimeout(()=>{ try { el.pause(); } catch{} }, 900);
     } catch {}
   }
 
@@ -177,11 +175,10 @@
       this._raf = null;
       this.defaultProgram = { base_hz:200, binaural_split_hz:4, isotonic_rate_hz:0.25, pink_noise_gain:0.06 };
 
-      // background pipe
+      // iOS background pipe
       this.pipeDest = null;
       this.pipeEl = null;
 
-      // low-power IR variants
       this._fullIR = null;
       this._shortIR = null;
     }
@@ -213,8 +210,9 @@
       if (this.context.state === "suspended") await this.context.resume();
     }
 
-    // Background pipe using the same silent asset
+    // iOS background pipe (Android SKIPS this)
     async attachPipe(){
+      if (IS_ANDROID) return; // <-- do not keep a background pipe on Android
       await this.ensure();
       if (this.pipeDest) return;
 
@@ -238,7 +236,7 @@
         const src = this.context.createMediaElementSource(el);
         src.connect(this.master);
         this.pipeDest = src;
-      } catch {}
+      } catch {} // already connected once
     }
 
     setVolume(v){
@@ -252,6 +250,26 @@
       }
       this.nodes = null;
       cancelAnimationFrame(this._raf); this._raf=null;
+    }
+    async hardClose(){
+      // Full teardown (used on Android when app/view goes to background)
+      try { this.stop(); } catch {}
+      try { if (this.master) this.master.disconnect(); } catch {}
+      try { if (this.limiter) this.limiter.disconnect(); } catch {}
+      try {
+        if (this.context && this.context.state !== "closed") {
+          await this.context.close();
+        }
+      } catch {}
+      this.context = null;
+      this.master = null;
+      this.limiter = null;
+      // Make sure any silent elements are paused
+      try { if (this.pipeEl) this.pipeEl.pause(); } catch {}
+      try {
+        const f = document.getElementById('pemfFocus');
+        if (f) f.pause();
+      } catch {}
     }
     _num(o, keys, d=0){ for (const k of keys){ if (o && o[k]!=null && isFinite(o[k])) return Number(o[k]); } return d; }
 
@@ -346,7 +364,7 @@
         if (n > len - fade){ const t = (n - (len - fade)) / fade; const w = 1 - t; L[n]*=w; R[n]*=w; }
         peak = Math.max(peak, Math.abs(L[n]), Math.abs(R[n]));
       }
-      const norm = peak>0 ? Math.min(0.88/peak, 2.0) : 1; // leave headroom before limiter
+      const norm = peak>0 ? Math.min(0.88/peak, 2.0) : 1; // headroom before limiter
       for (let n=0;n<len;n++){ L[n]*=norm; R[n]*=norm; }
       return buf;
     }
@@ -439,13 +457,11 @@
       this._raf = requestAnimationFrame(tick);
     }
 
-    // Reduce CPU when hidden, restore when visible
     enterLowPower(quiet){
       if (!this.nodes || !this.context) return;
       const { convolver, modalBank } = this.nodes;
       const now = this.context.currentTime;
 
-      // Trim IR for background
       if (quiet) {
         if (convolver && convolver.buffer && !this._shortIR && this._fullIR) {
           const b = this._fullIR, sr = b.sampleRate;
@@ -462,7 +478,6 @@
         if (convolver && this._fullIR) convolver.buffer = this._fullIR;
       }
 
-      // Reduce modal load in background
       if (modalBank && modalBank.length){
         const keep = quiet ? 8 : 48;
         modalBank.forEach((m,i)=>{
@@ -498,7 +513,7 @@
     const irRef = useRef(null);
 
     function stopOtherAppAudio(){ broadcastStopToHost(); }
-    useEffect(()=>{ stopOtherAppAudio(); },[]); // stop GoodBarber stream on load
+    useEffect(()=>{ stopOtherAppAudio(); },[]); // stop GB stream on load
 
     // Initial load
     useEffect(()=>{
@@ -582,7 +597,7 @@
       return ()=>{ alive=false; };
     }, [site]);
 
-    // Visibility-driven quality switch
+    // Visibility-driven quality switch (all platforms)
     useEffect(()=>{
       const onVis = () => {
         const eg = irRef.current;
@@ -592,6 +607,43 @@
       };
       document.addEventListener("visibilitychange", onVis);
       return ()=>document.removeEventListener("visibilitychange", onVis);
+    }, []);
+
+    // ANDROID-ONLY: hard stop when leaving the view/app
+    useEffect(()=>{
+      if (!IS_ANDROID) return;
+      const hardStop = async () => {
+        try { broadcastStopToHost(); } catch {}
+        try {
+          if (irRef.current && typeof irRef.current.hardClose === "function") {
+            await irRef.current.hardClose();
+          }
+        } catch {}
+        irRef.current = null;
+        setIsPlaying(false);
+        setPlayerOpen(false);
+        setCurrentTime(0);
+      };
+
+      const onHidden = ()=>{ if (document.hidden) hardStop(); };
+      const onPageHide = ()=>{ hardStop(); };
+      const onBlur = ()=>{ hardStop(); };
+      const onFreeze = ()=>{ hardStop(); };
+      const onCordovaPause = ()=>{ hardStop(); }; // Cordova/Capacitor
+
+      document.addEventListener("visibilitychange", onHidden);
+      window.addEventListener("pagehide", onPageHide);
+      window.addEventListener("blur", onBlur);
+      document.addEventListener("freeze", onFreeze);
+      document.addEventListener("pause", onCordovaPause);
+
+      return ()=> {
+        document.removeEventListener("visibilitychange", onHidden);
+        window.removeEventListener("pagehide", onPageHide);
+        window.removeEventListener("blur", onBlur);
+        document.removeEventListener("freeze", onFreeze);
+        document.removeEventListener("pause", onCordovaPause);
+      };
     }, []);
 
     function stopAll(collapse=false){
@@ -615,20 +667,21 @@
       if (!site) return;
 
       if (sendStop) {
-        await requestAudioFocus(); // claim native focus first
-        stopOtherAppAudio();       // tell GoodBarber to stop its MP3 stream
+        await requestAudioFocus(); // claim focus
+        stopOtherAppAudio();       // ask GoodBarber to stop its stream
       }
 
       setPlayerOpen(true); setError("");
+
       try{
         setLoading(true);
 
-        if (irRef.current) { irRef.current.stop(); irRef.current = null; }
+        if (irRef.current) { await irRef.current.hardClose?.(); irRef.current = null; }
         irRef.current = new IREngine();
         const eg = irRef.current;
 
         await eg.ensure();
-        await eg.attachPipe();     // keep WebAudio alive in background
+        await eg.attachPipe();     // iOS only (Android skip inside attachPipe)
 
         eg.loop = loop;
         eg.setVolume(volume);
