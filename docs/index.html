@@ -20,6 +20,9 @@
 </head>
 
 <body>
+  <!-- Hidden audio used to grab Android audio focus (the “mp3 trick”) -->
+  <audio id="focusKiller" src="./silence.mp3" preload="auto" playsinline style="display:none"></audio>
+
   <div id="root"></div>
 
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
@@ -106,13 +109,35 @@
     };
   };
 
+  // ---------------- ANDROID AUDIO-FOCUS “MP3 TRICK” ----------------
+  let FOCUS_CLAIMING = false;
+  async function claimAndroidAudioFocus() {
+    // Only try on Android, and avoid overlapping attempts
+    if (!/Android/i.test(navigator.userAgent) || FOCUS_CLAIMING) return;
+    const el = document.getElementById("focusKiller");
+    if (!el) return;
+    try {
+      FOCUS_CLAIMING = true;
+      el.currentTime = 0;
+      // Use an actually silent MP3 (all zeros) so it's inaudible but still counts as media
+      el.muted = false;        // must NOT be muted to claim focus on some devices
+      el.volume = 1.0;         // file is silent, so volume is safe
+      await el.play();         // requires user gesture when not muted—OK on Play click
+      setTimeout(()=>{ try{ el.pause(); }catch{} FOCUS_CLAIMING=false; }, 320);
+    } catch {
+      FOCUS_CLAIMING = false;
+    }
+  }
+
   // ---------------- HOST APP BRIDGE ----------------
-  function broadcastStopToHost() {
+  function broadcastStopToHost(tryGrabAndroidFocus=false) {
     try {
       // Send both casings for safety across implementations
       window.parent.postMessage({ type: "pemf_stop_all_audio" }, "*");
       window.parent.postMessage({ type: "PEMF_STOP_ALL_AUDIO" }, "*");
     } catch {}
+    // If requested, also grab Android audio focus via silent MP3
+    if (tryGrabAndroidFocus) claimAndroidAudioFocus();
   }
 
   // ---------------- AUDIO ENGINE ----------------
@@ -146,13 +171,7 @@
         this.limiter = comp;
         this.master.connect(this.limiter).connect(this.context.destination);
 
-        // Keep state visible
-        this.context.onstatechange = () => {
-          // If Android suspends unexpectedly, UI can observe and react if needed
-          // console.log("AudioContext state:", this.context.state);
-        };
-
-        // iOS: keep-awake helper is elsewhere in your build if needed
+        // Auto-resume on visibility
         document.addEventListener("visibilitychange", () => {
           if (document.visibilityState === "visible" && this.context && this.context.state !== "running") {
             this.context.resume();
@@ -283,7 +302,7 @@
         if (n > len - fade){ const t = (n - (len - fade)) / fade; const w = 1 - t; L[n]*=w; R[n]*=w; }
         peak = Math.max(peak, Math.abs(L[n]), Math.abs(R[n]));
       }
-      const norm = peak>0 ? Math.min(0.88/peak, 2.0) : 1; // ensure headroom before limiter
+      const norm = peak>0 ? Math.min(0.88/peak, 2.0) : 1;
       for (let n=0;n<len;n++){ L[n]*=norm; R[n]*=norm; }
       return buf;
     }
@@ -398,8 +417,8 @@
     const totalTime = minutes * 60;
     const irRef = useRef(null);
 
-    function stopOtherAppAudio(){ broadcastStopToHost(); }
-    useEffect(()=>{ stopOtherAppAudio(); },[]); // stop any host audio on load
+    function stopOtherAppAudio(){ broadcastStopToHost(true); } // <-- tryGrabAndroidFocus=true
+    useEffect(()=>{ stopOtherAppAudio(); },[]); // on load
 
     // Initial load with full-screen preloader
     useEffect(()=>{
@@ -464,7 +483,7 @@
 
     async function hardStopEverywhere(collapse=false){
       try { stopTimers(); } catch {}
-      try { broadcastStopToHost(); } catch {}
+      try { broadcastStopToHost(true); } catch {}
       if (irRef.current){
         try { await irRef.current.hardClose(); } catch {}
         irRef.current = null;
@@ -493,7 +512,7 @@
 
     async function play(sendStop=true){
       if (!site) return;
-      if (sendStop) stopOtherAppAudio();
+      if (sendStop) stopOtherAppAudio();           // <-- includes Android mp3 trick
       setPlayerOpen(true); setError("");
       try{
         setLoading(true);
@@ -539,14 +558,14 @@
 
     // -------- ANDROID LIFECYCLE GUARDS --------
     useEffect(()=>{
-      const onHidden = ()=>{ if (document.hidden) { broadcastStopToHost(); hardStopEverywhere(true); } };
-      const onPageHide = ()=>{ broadcastStopToHost(); hardStopEverywhere(true); };
-      const onBlur = ()=>{ if (IS_ANDROID) { broadcastStopToHost(); hardStopEverywhere(true); } };
-      const onFreeze = ()=>{ broadcastStopToHost(); hardStopEverywhere(true); };
+      const onHidden = ()=>{ if (document.hidden) { broadcastStopToHost(true); hardStopEverywhere(true); } };
+      const onPageHide = ()=>{ broadcastStopToHost(true); hardStopEverywhere(true); };
+      const onBlur = ()=>{ if (IS_ANDROID) { broadcastStopToHost(true); hardStopEverywhere(true); } };
+      const onFreeze = ()=>{ broadcastStopToHost(true); hardStopEverywhere(true); };
 
-      const onVisible = ()=>{ if (!document.hidden) broadcastStopToHost(); };
-      const onFocus = ()=>{ broadcastStopToHost(); };
-      const onResume = ()=>{ broadcastStopToHost(); };
+      const onVisible = ()=>{ if (!document.hidden) broadcastStopToHost(true); };
+      const onFocus = ()=>{ broadcastStopToHost(true); };
+      const onResume = ()=>{ broadcastStopToHost(true); };
 
       document.addEventListener("visibilitychange", onHidden);
       window.addEventListener("pagehide", onPageHide);
