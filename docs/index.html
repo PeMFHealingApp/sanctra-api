@@ -2,28 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <!-- Disable zoom; allow safe area -->
-  <meta name="viewport"
-        content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="robots" content="noindex,nofollow" />
   <title>Sanctra IR</title>
-
-  <!-- Prevent pinch / double-tap / wheel-zoom -->
-  <script>
-  (function () {
-    const block = e => e.preventDefault();
-    document.addEventListener('gesturestart', block, { passive:false });
-    document.addEventListener('gesturechange', block, { passive:false });
-    document.addEventListener('gestureend', block, { passive:false });
-    let lastEnd = 0;
-    document.addEventListener('touchend', e => {
-      const now = Date.now();
-      if (now - lastEnd <= 350) e.preventDefault();
-      lastEnd = now;
-    }, { passive:false });
-    window.addEventListener('wheel', e => { if (e.ctrlKey) e.preventDefault(); }, { passive:false });
-  })();
-  </script>
 
   <!-- Quicksand -->
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -35,18 +16,15 @@
   <link rel="icon" href="./favicon.ico?v=2" type="image/x-icon" sizes="any">
 
   <meta name="theme-color" content="#0b0b0b" />
-  <link rel="stylesheet" href="style.css?v=2025-09-07-7" />
 
-  <!-- Tiny CSS helper so taps don't trigger zoom on some Androids -->
-  <style>html,body{touch-action:manipulation}</style>
+  <!-- Your separated CSS file (unchanged) -->
+  <link rel="stylesheet" href="style.css?v=2025-09-07-8" />
 </head>
 
 <body>
-  <!-- Hidden audio used to grab native audio focus -->
-  <audio id="pemfFocus" src="./silence.mp3" preload="auto" playsinline style="display:none"></audio>
-
   <div id="root"></div>
 
+  <!-- React -->
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
 
@@ -131,23 +109,35 @@
     };
   };
 
-  // ---------------- HOST APP BRIDGE ----------------
-  function broadcastStopToHost() {
-    try {
-      window.parent.postMessage({ type: "pemf_stop_all_audio" }, "*");
-      window.parent.postMessage({ type: "PEMF_STOP_ALL_AUDIO" }, "*");
-    } catch {}
-  }
-
-  // Play a tiny silent mp3 to seize native audio focus (Android/iOS)
-  async function requestAudioFocus() {
-    try {
-      const a = document.getElementById('pemfFocus');
-      if (!a) return;
-      a.currentTime = 0;
-      await a.play();                        // must run in user-gesture (our Play button)
-      setTimeout(() => { try { a.pause(); } catch {} }, 1200);
-    } catch {}
+  // ---------------- CUSTOM DROPDOWN ----------------
+  function Dropdown({ value, options, onChange, busy }) {
+    const [open, setOpen] = useState(false);
+    const ref = useRef(null);
+    useEffect(()=>{
+      const onDoc = e => { if (!ref.current) return; if (!ref.current.contains(e.target)) setOpen(false); };
+      document.addEventListener("click", onDoc);
+      return () => document.removeEventListener("click", onDoc);
+    },[]);
+    return (
+      React.createElement("div", { className:"dd", ref },
+        React.createElement("button", { className:"ddBtn", onClick:()=>setOpen(o=>!o), "aria-expanded":open, "aria-haspopup":"listbox" },
+          React.createElement("span", { className:"ddValue" }, value || "—"),
+          React.createElement("span", { className:"arrow" })
+        ),
+        open && React.createElement("div", { className:"ddList", role:"listbox" },
+          busy ? React.createElement("div", { className:"ddLoading" }, React.createElement("div",{className:"spinner"}), "Loading…")
+               : options.map(opt =>
+                  React.createElement("div", {
+                    key:String(opt),
+                    role:"option",
+                    "aria-selected": String(opt)===String(value),
+                    className:"ddItem"+(String(opt)===String(value)?" sel":""),
+                    onClick:()=>{ onChange(String(opt)); setOpen(false); }
+                  }, String(opt))
+                )
+        )
+      )
+    );
   }
 
   // ---------------- AUDIO ENGINE ----------------
@@ -162,14 +152,22 @@
       this.onUpdate = () => {};
       this._raf = null;
       this.defaultProgram = { base_hz:200, binaural_split_hz:4, isotonic_rate_hz:0.25, pink_noise_gain:0.06 };
+
+      // iOS background pipe + IR variants for low-power mode
+      this.pipeDest = null;
+      this.pipeEl = null;
+      this._fullIR = null;
+      this._shortIR = null;
     }
     async ensure(){
       if (!this.context){
         const AC = window.AudioContext || window.webkitAudioContext;
         this.context = new AC({ latencyHint:"playback" });
+        // Master gain into limiter into destination
         this.master = this.context.createGain();
-        const ceiling = 0.89125; // -1dB linear
+        const ceiling = 0.89125; // -1 dB linear
         this.master.gain.value = ceiling;
+
         const comp = this.context.createDynamicsCompressor();
         comp.threshold.value = -3;
         comp.knee.value = 0.1;
@@ -177,18 +175,56 @@
         comp.attack.value = 0.002;
         comp.release.value = 0.10;
         this.limiter = comp;
+
         this.master.connect(this.limiter).connect(this.context.destination);
 
+        // Keep alive on focus
         document.addEventListener("visibilitychange", () => {
-          if (document.visibilityState === "visible" && this.context && this.context.state !== "running") {
-            this.context.resume();
-          }
+          if (document.visibilityState === "visible" && this.context.state !== "running") this.context.resume();
         }, { passive:true });
+
+        // Stop on leave
         window.addEventListener("pagehide", ()=>this.stop(), { passive:true });
         window.addEventListener("beforeunload", ()=>this.stop(), { passive:true });
       }
       if (this.context.state === "suspended") await this.context.resume();
     }
+
+    // iOS background pipe using a silent local asset
+    async attachPipe(){
+      await this.ensure();
+      if (this.pipeDest) return;
+
+      let el = document.getElementById("bg-silence");
+      if (!el) {
+        el = document.createElement("audio");
+        el.id = "bg-silence";
+        el.src = "./silence.mp3"; // place in /docs
+        el.loop = true;
+        el.preload = "auto";
+        el.setAttribute("playsinline", "");
+        el.setAttribute("webkit-playsinline", "");
+        el.crossOrigin = "anonymous";
+        el.style.display = "none";
+        document.body.appendChild(el);
+      }
+      this.pipeEl = el;
+      try {
+        // very low volume so the pipeline stays active
+        el.volume = 0.001;
+        await el.play();
+      } catch(e) {
+        // if user gesture required, play() will succeed when called from the gesture handler
+      }
+      try {
+        const src = this.context.createMediaElementSource(el);
+        src.connect(this.master);
+        this.pipeDest = src;
+      } catch(e) {
+        // MediaElementSource can be created only once per element; ignore if already connected
+      }
+    }
+
     setVolume(v){
       if (this.master) this.master.gain.setTargetAtTime(0.89125 * clamp01(v), this.context.currentTime, 0.01);
     }
@@ -200,13 +236,6 @@
       }
       this.nodes = null;
       cancelAnimationFrame(this._raf); this._raf=null;
-    }
-    async hardClose(){
-      this.stop();
-      if (this.master) { try { this.master.disconnect(); } catch {} }
-      if (this.limiter) { try { this.limiter.disconnect(); } catch {} }
-      try { if (this.context && this.context.state !== "closed") await this.context.close(); } catch {}
-      this.context = null; this.master = null; this.limiter = null;
     }
     _num(o, keys, d=0){ for (const k of keys){ if (o && o[k]!=null && isFinite(o[k])) return Number(o[k]); } return d; }
 
@@ -235,6 +264,7 @@
       const L = buf.getChannelData(0), R = buf.getChannelData(1);
       const preN = Math.floor(preDelay * sr);
 
+      // Early reflections
       const earlyScale = 1 - earlyLateBalance;
       taps.forEach(t=>{
         const tSec = this._num(t,["time_s","t","delay_s","time"],0);
@@ -250,6 +280,7 @@
         }
       });
 
+      // Helpers
       const nearestRT = f=>{
         if (!bands.length) return maxRT;
         let best = bands[0], bd = Math.abs(f - (best.center_hz || best.freq_hz || best.hz || 500));
@@ -264,6 +295,7 @@
       const itdl = Math.floor(0.0006 * sr) * stereoWidth;
       const lpAlpha = hfRolloffHz > 0 ? Math.exp(-(Math.PI*2) * hfRolloffHz / sr) : 0;
 
+      // Late modal tail
       modes.slice(0,256).forEach(m=>{
         const f = Math.max(25, Number(m.freq_hz ?? m.f ?? m.freq ?? 0));
         if (!isFinite(f) || f<=0) return;
@@ -282,6 +314,7 @@
         }
       });
 
+      // LFE bloom
       if (lfeGain>0){
         let al=0, ar=0; const k = 0.0005 * lfeGain;
         for (let n=0;n<len;n++){
@@ -290,13 +323,14 @@
         }
       }
 
+      // Fade & normalize with headroom
       const fade = Math.min(Math.floor(len*0.12), Math.floor(sr*0.8));
       let peak = 0;
       for (let n=0;n<len;n++){
         if (n > len - fade){ const t = (n - (len - fade)) / fade; const w = 1 - t; L[n]*=w; R[n]*=w; }
         peak = Math.max(peak, Math.abs(L[n]), Math.abs(R[n]));
       }
-      const norm = peak>0 ? Math.min(0.88/peak, 2.0) : 1; // headroom before limiter
+      const norm = peak>0 ? Math.min(0.88/peak, 2.0) : 1;
       for (let n=0;n<len;n++){ L[n]*=norm; R[n]*=norm; }
       return buf;
     }
@@ -328,7 +362,12 @@
       };
 
       const merger = ctx.createChannelMerger(2);
-      const convolver = ctx.createConvolver(); convolver.normalize = true; convolver.buffer = irBuffer;
+      const convolver = ctx.createConvolver(); 
+      convolver.normalize = true; 
+      convolver.buffer = irBuffer;
+      // remember full IR
+      this._fullIR = irBuffer;
+      this._shortIR = null;
 
       const wet = ctx.createGain(); wet.gain.value = 1.0;
       const dry = ctx.createGain(); dry.gain.value = 0.0;
@@ -352,6 +391,7 @@
       const nGain = ctx.createGain(); nGain.gain.value = Math.max(0, program.pink_noise_gain);
       noiseSrc.connect(nGain).connect(merger);
 
+      // Modal sparkles
       const modal = [];
       const modes = Array.isArray(irJson?.modal_summary) ? irJson.modal_summary : [];
       modes.slice(0,48).forEach((m,i)=>{
@@ -360,6 +400,7 @@
         const g = Number(m.gain ?? m.g ?? m.amp ?? m.a ?? 0.15);
         const src = ctx.createOscillator(); src.type = "sine"; src.frequency.value = f;
         const gn = ctx.createGain(); gn.gain.value = 0.10 * g;
+        gn._baseGain = g; // store base
         src.connect(gn).connect(merger, 0, i%2);
         modal.push({src, gn});
       });
@@ -383,11 +424,43 @@
       const tick = () => { this.onUpdate(); this._raf = requestAnimationFrame(tick); };
       this._raf = requestAnimationFrame(tick);
     }
+
+    // Reduce CPU when hidden, restore when visible
+    enterLowPower(quiet){
+      if (!this.nodes || !this.context) return;
+      const { convolver, modalBank } = this.nodes;
+      const now = this.context.currentTime;
+
+      // Trim IR for background
+      if (quiet) {
+        if (convolver && convolver.buffer && !this._shortIR && this._fullIR) {
+          const b = this._fullIR, sr = b.sampleRate;
+          const sec = Math.min(3, b.length / sr);
+          const frames = Math.max(1, Math.floor(sec * sr));
+          const short = this.context.createBuffer(2, frames, sr);
+          for (let ch=0; ch<Math.min(2,b.numberOfChannels); ch++) {
+            short.getChannelData(ch).set(b.getChannelData(ch).subarray(0, frames));
+          }
+          this._shortIR = short;
+        }
+        if (convolver && this._shortIR) convolver.buffer = this._shortIR;
+      } else {
+        if (convolver && this._fullIR) convolver.buffer = this._fullIR;
+      }
+
+      // Reduce modal load in background
+      if (modalBank && modalBank.length){
+        const keep = quiet ? 8 : 48;
+        modalBank.forEach((m,i)=>{
+          const target = (i < keep) ? (quiet ? 0.06 : 0.10) * (m._baseGain || 1) : 0;
+          m.gn.gain.setTargetAtTime(target, now, 0.08);
+        });
+      }
+    }
   }
 
   // ---------------- APP ----------------
   function App(){
-    const IS_ANDROID = /Android/i.test(navigator.userAgent);
     const [booting, setBooting] = useState(true);
     const [countries, setCountries] = useState([]);
     const [allSites, setAllSites] = useState([]);
@@ -410,10 +483,10 @@
     const totalTime = minutes * 60;
     const irRef = useRef(null);
 
-    function stopOtherAppAudio(){ broadcastStopToHost(); }
-    useEffect(()=>{ stopOtherAppAudio(); },[]); // stop host audio on load
+    function stopOtherAppAudio(){ try{ window.parent.postMessage({ type:"pemf_stop_all_audio" }, "*"); }catch{} }
+    useEffect(()=>{ stopOtherAppAudio(); },[]);
 
-    // Initial load with full-screen preloader
+    // Initial load
     useEffect(()=>{
       let alive = true;
       const init = async ()=>{
@@ -425,9 +498,11 @@
           if (!list.includes("Egypt")) list = ["Egypt", ...list.filter(x=>x!=="Egypt")];
 
           const siteLists = await Promise.all(list.map(async c=>{
-            const r = await fetch(ENDPOINTS.sitesForCountry(c));
-            const j = await safeJSON(r);
-            return normalizeSites(j);
+            try{
+              const r = await fetch(ENDPOINTS.sitesForCountry(c));
+              const j = await safeJSON(r);
+              return normalizeSites(j);
+            } catch { return []; }
           }));
           const agg = [...new Set(siteLists.flat())].sort((a,b)=>a.localeCompare(b));
           if (!alive) return;
@@ -443,15 +518,36 @@
         finally { if (alive){ setLoading(false); setTimeout(()=>setBooting(false), 300); } }
       };
       init();
-      return ()=>{ alive=false; hardStopEverywhere(true); };
+      return ()=>{ alive=false; stopAll(true); };
     },[]);
 
-    // Stop current playback on changes
-    useEffect(()=>{ if (isPlaying) stopAll(false, IS_ANDROID); }, [country]);
-    useEffect(()=>{ if (isPlaying) stopAll(false, IS_ANDROID); }, [site]);
-    useEffect(()=>{ if (isPlaying) stopAll(false, IS_ANDROID); }, [minutes]);
+    // Update on country change
+    useEffect(()=>{
+      let alive=true;
+      const run = async ()=>{
+        try{
+          setLoading(true); setError(""); setImgBroken(false);
+          if (country==="All Sites"){
+            setSites(allSites); setSite(allSites[0] || "");
+          } else {
+            const r = await fetch(ENDPOINTS.sitesForCountry(country));
+            const j = await safeJSON(r);
+            const sl = normalizeSites(j);
+            setSites(sl); setSite(sl[0] || "");
+          }
+        } catch(e){ console.error(e); if (alive) setError("Failed to load sites."); }
+        finally{ if (alive) setLoading(false); }
+      };
+      if (allSites.length || country!=="All Sites") run();
+      return ()=>{ alive=false; };
+    }, [country, allSites]);
 
-    // Load site info + image
+    // Stop audio when preset changes
+    useEffect(()=>{ if (isPlaying) stopAll(false); }, [country]);
+    useEffect(()=>{ if (isPlaying) stopAll(false); }, [site]);
+    useEffect(()=>{ if (isPlaying) stopAll(false); }, [minutes]);
+
+    // Load info + image
     useEffect(()=>{
       let alive=true;
       const load = async ()=>{
@@ -472,21 +568,19 @@
       return ()=>{ alive=false; };
     }, [site]);
 
-    function stopTimers(){ /* reserved for future timers */ }
+    // Visibility-driven quality switch
+    useEffect(()=>{
+      const onVis = () => {
+        const eg = irRef.current;
+        if (!eg) return;
+        eg.enterLowPower(document.visibilityState !== "visible");
+        try { eg.context && eg.context.resume(); } catch {}
+      };
+      document.addEventListener("visibilitychange", onVis);
+      return ()=>document.removeEventListener("visibilitychange", onVis);
+    }, []);
 
-    async function hardStopEverywhere(collapse=false){
-      try { stopTimers(); } catch {}
-      try { broadcastStopToHost(); } catch {}
-      if (irRef.current){
-        try { await irRef.current.hardClose(); } catch {}
-        irRef.current = null;
-      }
-      setIsPlaying(false);
-      if (collapse){ setPlayerOpen(false); setCurrentTime(0); }
-    }
-
-    function stopAll(collapse=false, hard=false){
-      if (hard) return void hardStopEverywhere(collapse);
+    function stopAll(collapse=false){
       if (irRef.current){ irRef.current.stop(); irRef.current = null; }
       setIsPlaying(false);
       if (collapse){ setPlayerOpen(false); setCurrentTime(0); }
@@ -505,19 +599,23 @@
 
     async function play(sendStop=true){
       if (!site) return;
-
-      // Grab native audio focus first, then notify host to stop mp3
-      if (sendStop) {
-        await requestAudioFocus();
-        stopOtherAppAudio();
-      }
-
+      if (sendStop) stopOtherAppAudio();
       setPlayerOpen(true); setError("");
+
       try{
         setLoading(true);
-        if (irRef.current) { await irRef.current.hardClose(); irRef.current = null; }
+
+        if (irRef.current) { irRef.current.stop(); irRef.current = null; }
         irRef.current = new IREngine();
-        const eg = irRef.current; eg.loop = loop; eg.setVolume(volume); eg.onUpdate = tick;
+        const eg = irRef.current;
+
+        // Ensure context and immediately start the iOS background pipe within this gesture
+        await eg.ensure();
+        await eg.attachPipe();
+
+        eg.loop = loop; 
+        eg.setVolume(volume); 
+        eg.onUpdate = tick;
 
         const resp = await fetch(ENDPOINTS.genIR, {
           method:"POST",
@@ -536,11 +634,22 @@
         await eg.loadAndStart(json || {}, hints);
         eg.startedAt = eg.context.currentTime;
         setIsPlaying(true);
+
+        if ("mediaSession" in navigator) {
+          navigator.mediaSession.metadata = new MediaMetadata({
+            title: site || "Sanctra IR",
+            artist: "PeMFHealing.app",
+            artwork: img ? [{ src: img, sizes: "512x512", type: "image/jpeg" }] : []
+          });
+          navigator.mediaSession.setActionHandler("play", () => play(false));
+          navigator.mediaSession.setActionHandler("pause", () => pause(false));
+          navigator.mediaSession.setActionHandler("stop", () => pause(true));
+        }
       } catch(e){ console.error(e); setError("IR synthesis failed."); }
       finally{ setLoading(false); }
     }
 
-    function pause(collapse=false){ stopAll(collapse, IS_ANDROID); }
+    function pause(collapse=false){ stopAll(collapse); }
     function seek(v){
       const t = Number(v);
       if (!isFinite(t) || !irRef.current) return;
@@ -555,40 +664,8 @@
       const val = Number(v); setVolume(val); if (irRef.current) irRef.current.setVolume(val);
     }
 
-    // -------- ANDROID LIFECYCLE GUARDS --------
-    useEffect(()=>{
-      const onHidden = ()=>{ if (document.hidden) { broadcastStopToHost(); hardStopEverywhere(true); } };
-      const onPageHide = ()=>{ broadcastStopToHost(); hardStopEverywhere(true); };
-      const onBlur = ()=>{ if (IS_ANDROID) { broadcastStopToHost(); hardStopEverywhere(true); } };
-      const onFreeze = ()=>{ broadcastStopToHost(); hardStopEverywhere(true); };
-
-      const onVisible = ()=>{ if (!document.hidden) broadcastStopToHost(); };
-      const onFocus = ()=>{ broadcastStopToHost(); };
-      const onResume = ()=>{ broadcastStopToHost(); };
-
-      document.addEventListener("visibilitychange", onHidden);
-      window.addEventListener("pagehide", onPageHide);
-      window.addEventListener("blur", onBlur);
-      document.addEventListener("freeze", onFreeze);
-
-      document.addEventListener("visibilitychange", onVisible);
-      window.addEventListener("focus", onFocus);
-      document.addEventListener("resume", onResume);
-
-      return ()=> {
-        document.removeEventListener("visibilitychange", onHidden);
-        window.removeEventListener("pagehide", onPageHide);
-        window.removeEventListener("blur", onBlur);
-        document.removeEventListener("freeze", onFreeze);
-        document.removeEventListener("visibilitychange", onVisible);
-        window.removeEventListener("focus", onFocus);
-        document.removeEventListener("resume", onResume);
-      };
-    }, []);
-
     const minuteOptions = [15, 36, 45];
 
-    // ---------------- RENDER ----------------
     return (
       React.createElement(React.Fragment, null,
 
@@ -690,37 +767,6 @@
               )
             )
           )
-        )
-      )
-    );
-  }
-
-  // ---------------- CUSTOM DROPDOWN ----------------
-  function Dropdown({ value, options, onChange, busy }) {
-    const [open, setOpen] = useState(false);
-    const ref = useRef(null);
-    useEffect(()=>{
-      const onDoc = e => { if (!ref.current) return; if (!ref.current.contains(e.target)) setOpen(false); };
-      document.addEventListener("click", onDoc);
-      return () => document.removeEventListener("click", onDoc);
-    },[]);
-    return (
-      React.createElement("div", { className:"dd", ref },
-        React.createElement("button", { className:"ddBtn", onClick:()=>setOpen(o=>!o), "aria-expanded":open, "aria-haspopup":"listbox" },
-          React.createElement("span", { className:"ddValue" }, value || "—"),
-          React.createElement("span", { className:"arrow" })
-        ),
-        open && React.createElement("div", { className:"ddList", role:"listbox" },
-          busy ? React.createElement("div", { className:"ddLoading" }, React.createElement("div",{className:"spinner"}), "Loading…")
-               : options.map(opt =>
-                  React.createElement("div", {
-                    key:String(opt),
-                    role:"option",
-                    "aria-selected": String(opt)===String(value),
-                    className:"ddItem"+(String(opt)===String(value)?" sel":""),
-                    onClick:()=>{ onChange(String(opt)); setOpen(false); }
-                  }, String(opt))
-                )
         )
       )
     );
