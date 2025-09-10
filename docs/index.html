@@ -16,15 +16,12 @@
   <link rel="icon" href="./favicon.ico?v=2" type="image/x-icon" sizes="any">
 
   <meta name="theme-color" content="#0b0b0b" />
-
-  <!-- Your separated CSS file (unchanged) -->
-  <link rel="stylesheet" href="style.css?v=2025-09-07-8" />
+  <link rel="stylesheet" href="style.css?v=2025-09-07-7" />
 </head>
 
 <body>
   <div id="root"></div>
 
-  <!-- React -->
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
 
@@ -109,35 +106,13 @@
     };
   };
 
-  // ---------------- CUSTOM DROPDOWN ----------------
-  function Dropdown({ value, options, onChange, busy }) {
-    const [open, setOpen] = useState(false);
-    const ref = useRef(null);
-    useEffect(()=>{
-      const onDoc = e => { if (!ref.current) return; if (!ref.current.contains(e.target)) setOpen(false); };
-      document.addEventListener("click", onDoc);
-      return () => document.removeEventListener("click", onDoc);
-    },[]);
-    return (
-      React.createElement("div", { className:"dd", ref },
-        React.createElement("button", { className:"ddBtn", onClick:()=>setOpen(o=>!o), "aria-expanded":open, "aria-haspopup":"listbox" },
-          React.createElement("span", { className:"ddValue" }, value || "—"),
-          React.createElement("span", { className:"arrow" })
-        ),
-        open && React.createElement("div", { className:"ddList", role:"listbox" },
-          busy ? React.createElement("div", { className:"ddLoading" }, React.createElement("div",{className:"spinner"}), "Loading…")
-               : options.map(opt =>
-                  React.createElement("div", {
-                    key:String(opt),
-                    role:"option",
-                    "aria-selected": String(opt)===String(value),
-                    className:"ddItem"+(String(opt)===String(value)?" sel":""),
-                    onClick:()=>{ onChange(String(opt)); setOpen(false); }
-                  }, String(opt))
-                )
-        )
-      )
-    );
+  // ---------------- HOST APP BRIDGE ----------------
+  function broadcastStopToHost() {
+    try {
+      // Send both casings for safety across implementations
+      window.parent.postMessage({ type: "pemf_stop_all_audio" }, "*");
+      window.parent.postMessage({ type: "PEMF_STOP_ALL_AUDIO" }, "*");
+    } catch {}
   }
 
   // ---------------- AUDIO ENGINE ----------------
@@ -152,22 +127,16 @@
       this.onUpdate = () => {};
       this._raf = null;
       this.defaultProgram = { base_hz:200, binaural_split_hz:4, isotonic_rate_hz:0.25, pink_noise_gain:0.06 };
-
-      // iOS background pipe + IR variants for low-power mode
-      this.pipeDest = null;
-      this.pipeEl = null;
-      this._fullIR = null;
-      this._shortIR = null;
     }
     async ensure(){
       if (!this.context){
         const AC = window.AudioContext || window.webkitAudioContext;
         this.context = new AC({ latencyHint:"playback" });
-        // Master gain into limiter into destination
+        // Master gain into brickwall-like limiter, then destination
         this.master = this.context.createGain();
-        const ceiling = 0.89125; // -1 dB linear
+        // ceiling -1 dB => linear ≈ 0.89125
+        const ceiling = 0.89125;
         this.master.gain.value = ceiling;
-
         const comp = this.context.createDynamicsCompressor();
         comp.threshold.value = -3;
         comp.knee.value = 0.1;
@@ -175,67 +144,51 @@
         comp.attack.value = 0.002;
         comp.release.value = 0.10;
         this.limiter = comp;
-
         this.master.connect(this.limiter).connect(this.context.destination);
 
-        // Keep alive on focus
-        document.addEventListener("visibilitychange", () => {
-          if (document.visibilityState === "visible" && this.context.state !== "running") this.context.resume();
-        }, { passive:true });
+        // Keep state visible
+        this.context.onstatechange = () => {
+          // If Android suspends unexpectedly, UI can observe and react if needed
+          // console.log("AudioContext state:", this.context.state);
+        };
 
-        // Stop on leave
-        window.addEventListener("pagehide", ()=>this.stop(), { passive:true });
-        window.addEventListener("beforeunload", ()=>this.stop(), { passive:true });
+        // iOS: keep-awake helper is elsewhere in your build if needed
+        document.addEventListener("visibilitychange", () => {
+          if (document.visibilityState === "visible" && this.context && this.context.state !== "running") {
+            this.context.resume();
+          }
+        }, { passive:true });
       }
       if (this.context.state === "suspended") await this.context.resume();
     }
-
-    // iOS background pipe using a silent local asset
-    async attachPipe(){
-      await this.ensure();
-      if (this.pipeDest) return;
-
-      let el = document.getElementById("bg-silence");
-      if (!el) {
-        el = document.createElement("audio");
-        el.id = "bg-silence";
-        el.src = "./silence.mp3"; // place in /docs
-        el.loop = true;
-        el.preload = "auto";
-        el.setAttribute("playsinline", "");
-        el.setAttribute("webkit-playsinline", "");
-        el.crossOrigin = "anonymous";
-        el.style.display = "none";
-        document.body.appendChild(el);
-      }
-      this.pipeEl = el;
-      try {
-        // very low volume so the pipeline stays active
-        el.volume = 0.001;
-        await el.play();
-      } catch(e) {
-        // if user gesture required, play() will succeed when called from the gesture handler
-      }
-      try {
-        const src = this.context.createMediaElementSource(el);
-        src.connect(this.master);
-        this.pipeDest = src;
-      } catch(e) {
-        // MediaElementSource can be created only once per element; ignore if already connected
-      }
-    }
-
     setVolume(v){
       if (this.master) this.master.gain.setTargetAtTime(0.89125 * clamp01(v), this.context.currentTime, 0.01);
     }
     stop(){
       if (this.nodes){
-        const { oscL, oscR, mod, noiseSrc, modalBank } = this.nodes;
+        const { oscL, oscR, mod, noiseSrc, modalBank, wet, dry, convolver } = this.nodes;
         [oscL,oscR,mod,noiseSrc].forEach(n=>{ try{ n && n.stop(); }catch{} });
+        try { wet && wet.disconnect(); } catch {}
+        try { dry && dry.disconnect(); } catch {}
+        try { convolver && convolver.disconnect(); } catch {}
         modalBank && modalBank.forEach(m=>{ try{ m.src.stop(); }catch{} });
       }
       this.nodes = null;
       cancelAnimationFrame(this._raf); this._raf=null;
+    }
+    async hardClose(){
+      // Full teardown to avoid orphaned playback in Android WebView
+      this.stop();
+      if (this.master) { try { this.master.disconnect(); } catch {} }
+      if (this.limiter) { try { this.limiter.disconnect(); } catch {} }
+      try {
+        if (this.context && this.context.state !== "closed") {
+          await this.context.close();
+        }
+      } catch {}
+      this.context = null;
+      this.master = null;
+      this.limiter = null;
     }
     _num(o, keys, d=0){ for (const k of keys){ if (o && o[k]!=null && isFinite(o[k])) return Number(o[k]); } return d; }
 
@@ -330,7 +283,7 @@
         if (n > len - fade){ const t = (n - (len - fade)) / fade; const w = 1 - t; L[n]*=w; R[n]*=w; }
         peak = Math.max(peak, Math.abs(L[n]), Math.abs(R[n]));
       }
-      const norm = peak>0 ? Math.min(0.88/peak, 2.0) : 1;
+      const norm = peak>0 ? Math.min(0.88/peak, 2.0) : 1; // ensure headroom before limiter
       for (let n=0;n<len;n++){ L[n]*=norm; R[n]*=norm; }
       return buf;
     }
@@ -362,12 +315,7 @@
       };
 
       const merger = ctx.createChannelMerger(2);
-      const convolver = ctx.createConvolver(); 
-      convolver.normalize = true; 
-      convolver.buffer = irBuffer;
-      // remember full IR
-      this._fullIR = irBuffer;
-      this._shortIR = null;
+      const convolver = ctx.createConvolver(); convolver.normalize = true; convolver.buffer = irBuffer;
 
       const wet = ctx.createGain(); wet.gain.value = 1.0;
       const dry = ctx.createGain(); dry.gain.value = 0.0;
@@ -400,7 +348,6 @@
         const g = Number(m.gain ?? m.g ?? m.amp ?? m.a ?? 0.15);
         const src = ctx.createOscillator(); src.type = "sine"; src.frequency.value = f;
         const gn = ctx.createGain(); gn.gain.value = 0.10 * g;
-        gn._baseGain = g; // store base
         src.connect(gn).connect(merger, 0, i%2);
         modal.push({src, gn});
       });
@@ -424,43 +371,11 @@
       const tick = () => { this.onUpdate(); this._raf = requestAnimationFrame(tick); };
       this._raf = requestAnimationFrame(tick);
     }
-
-    // Reduce CPU when hidden, restore when visible
-    enterLowPower(quiet){
-      if (!this.nodes || !this.context) return;
-      const { convolver, modalBank } = this.nodes;
-      const now = this.context.currentTime;
-
-      // Trim IR for background
-      if (quiet) {
-        if (convolver && convolver.buffer && !this._shortIR && this._fullIR) {
-          const b = this._fullIR, sr = b.sampleRate;
-          const sec = Math.min(3, b.length / sr);
-          const frames = Math.max(1, Math.floor(sec * sr));
-          const short = this.context.createBuffer(2, frames, sr);
-          for (let ch=0; ch<Math.min(2,b.numberOfChannels); ch++) {
-            short.getChannelData(ch).set(b.getChannelData(ch).subarray(0, frames));
-          }
-          this._shortIR = short;
-        }
-        if (convolver && this._shortIR) convolver.buffer = this._shortIR;
-      } else {
-        if (convolver && this._fullIR) convolver.buffer = this._fullIR;
-      }
-
-      // Reduce modal load in background
-      if (modalBank && modalBank.length){
-        const keep = quiet ? 8 : 48;
-        modalBank.forEach((m,i)=>{
-          const target = (i < keep) ? (quiet ? 0.06 : 0.10) * (m._baseGain || 1) : 0;
-          m.gn.gain.setTargetAtTime(target, now, 0.08);
-        });
-      }
-    }
   }
 
   // ---------------- APP ----------------
   function App(){
+    const IS_ANDROID = /Android/i.test(navigator.userAgent);
     const [booting, setBooting] = useState(true);
     const [countries, setCountries] = useState([]);
     const [allSites, setAllSites] = useState([]);
@@ -483,10 +398,10 @@
     const totalTime = minutes * 60;
     const irRef = useRef(null);
 
-    function stopOtherAppAudio(){ try{ window.parent.postMessage({ type:"pemf_stop_all_audio" }, "*"); }catch{} }
-    useEffect(()=>{ stopOtherAppAudio(); },[]);
+    function stopOtherAppAudio(){ broadcastStopToHost(); }
+    useEffect(()=>{ stopOtherAppAudio(); },[]); // stop any host audio on load
 
-    // Initial load
+    // Initial load with full-screen preloader
     useEffect(()=>{
       let alive = true;
       const init = async ()=>{
@@ -498,11 +413,9 @@
           if (!list.includes("Egypt")) list = ["Egypt", ...list.filter(x=>x!=="Egypt")];
 
           const siteLists = await Promise.all(list.map(async c=>{
-            try{
-              const r = await fetch(ENDPOINTS.sitesForCountry(c));
-              const j = await safeJSON(r);
-              return normalizeSites(j);
-            } catch { return []; }
+            const r = await fetch(ENDPOINTS.sitesForCountry(c));
+            const j = await safeJSON(r);
+            return normalizeSites(j);
           }));
           const agg = [...new Set(siteLists.flat())].sort((a,b)=>a.localeCompare(b));
           if (!alive) return;
@@ -518,36 +431,15 @@
         finally { if (alive){ setLoading(false); setTimeout(()=>setBooting(false), 300); } }
       };
       init();
-      return ()=>{ alive=false; stopAll(true); };
+      return ()=>{ alive=false; hardStopEverywhere(true); };
     },[]);
 
-    // Update on country change
-    useEffect(()=>{
-      let alive=true;
-      const run = async ()=>{
-        try{
-          setLoading(true); setError(""); setImgBroken(false);
-          if (country==="All Sites"){
-            setSites(allSites); setSite(allSites[0] || "");
-          } else {
-            const r = await fetch(ENDPOINTS.sitesForCountry(country));
-            const j = await safeJSON(r);
-            const sl = normalizeSites(j);
-            setSites(sl); setSite(sl[0] || "");
-          }
-        } catch(e){ console.error(e); if (alive) setError("Failed to load sites."); }
-        finally{ if (alive) setLoading(false); }
-      };
-      if (allSites.length || country!=="All Sites") run();
-      return ()=>{ alive=false; };
-    }, [country, allSites]);
+    // Respond to country/site/minutes changes: stop current playback
+    useEffect(()=>{ if (isPlaying) stopAll(false, IS_ANDROID); }, [country]);
+    useEffect(()=>{ if (isPlaying) stopAll(false, IS_ANDROID); }, [site]);
+    useEffect(()=>{ if (isPlaying) stopAll(false, IS_ANDROID); }, [minutes]);
 
-    // Stop audio when preset changes
-    useEffect(()=>{ if (isPlaying) stopAll(false); }, [country]);
-    useEffect(()=>{ if (isPlaying) stopAll(false); }, [site]);
-    useEffect(()=>{ if (isPlaying) stopAll(false); }, [minutes]);
-
-    // Load info + image
+    // Load site info + image
     useEffect(()=>{
       let alive=true;
       const load = async ()=>{
@@ -568,19 +460,21 @@
       return ()=>{ alive=false; };
     }, [site]);
 
-    // Visibility-driven quality switch
-    useEffect(()=>{
-      const onVis = () => {
-        const eg = irRef.current;
-        if (!eg) return;
-        eg.enterLowPower(document.visibilityState !== "visible");
-        try { eg.context && eg.context.resume(); } catch {}
-      };
-      document.addEventListener("visibilitychange", onVis);
-      return ()=>document.removeEventListener("visibilitychange", onVis);
-    }, []);
+    function stopTimers(){ /* placeholder if you add timers later */ }
 
-    function stopAll(collapse=false){
+    async function hardStopEverywhere(collapse=false){
+      try { stopTimers(); } catch {}
+      try { broadcastStopToHost(); } catch {}
+      if (irRef.current){
+        try { await irRef.current.hardClose(); } catch {}
+        irRef.current = null;
+      }
+      setIsPlaying(false);
+      if (collapse){ setPlayerOpen(false); setCurrentTime(0); }
+    }
+
+    function stopAll(collapse=false, hard=false){
+      if (hard) return void hardStopEverywhere(collapse);
       if (irRef.current){ irRef.current.stop(); irRef.current = null; }
       setIsPlaying(false);
       if (collapse){ setPlayerOpen(false); setCurrentTime(0); }
@@ -601,21 +495,11 @@
       if (!site) return;
       if (sendStop) stopOtherAppAudio();
       setPlayerOpen(true); setError("");
-
       try{
         setLoading(true);
-
-        if (irRef.current) { irRef.current.stop(); irRef.current = null; }
+        if (irRef.current) { await irRef.current.hardClose(); irRef.current = null; }
         irRef.current = new IREngine();
-        const eg = irRef.current;
-
-        // Ensure context and immediately start the iOS background pipe within this gesture
-        await eg.ensure();
-        await eg.attachPipe();
-
-        eg.loop = loop; 
-        eg.setVolume(volume); 
-        eg.onUpdate = tick;
+        const eg = irRef.current; eg.loop = loop; eg.setVolume(volume); eg.onUpdate = tick;
 
         const resp = await fetch(ENDPOINTS.genIR, {
           method:"POST",
@@ -634,22 +518,11 @@
         await eg.loadAndStart(json || {}, hints);
         eg.startedAt = eg.context.currentTime;
         setIsPlaying(true);
-
-        if ("mediaSession" in navigator) {
-          navigator.mediaSession.metadata = new MediaMetadata({
-            title: site || "Sanctra IR",
-            artist: "PeMFHealing.app",
-            artwork: img ? [{ src: img, sizes: "512x512", type: "image/jpeg" }] : []
-          });
-          navigator.mediaSession.setActionHandler("play", () => play(false));
-          navigator.mediaSession.setActionHandler("pause", () => pause(false));
-          navigator.mediaSession.setActionHandler("stop", () => pause(true));
-        }
       } catch(e){ console.error(e); setError("IR synthesis failed."); }
       finally{ setLoading(false); }
     }
 
-    function pause(collapse=false){ stopAll(collapse); }
+    function pause(collapse=false){ stopAll(collapse, IS_ANDROID); }
     function seek(v){
       const t = Number(v);
       if (!isFinite(t) || !irRef.current) return;
@@ -664,8 +537,40 @@
       const val = Number(v); setVolume(val); if (irRef.current) irRef.current.setVolume(val);
     }
 
+    // -------- ANDROID LIFECYCLE GUARDS --------
+    useEffect(()=>{
+      const onHidden = ()=>{ if (document.hidden) { broadcastStopToHost(); hardStopEverywhere(true); } };
+      const onPageHide = ()=>{ broadcastStopToHost(); hardStopEverywhere(true); };
+      const onBlur = ()=>{ if (IS_ANDROID) { broadcastStopToHost(); hardStopEverywhere(true); } };
+      const onFreeze = ()=>{ broadcastStopToHost(); hardStopEverywhere(true); };
+
+      const onVisible = ()=>{ if (!document.hidden) broadcastStopToHost(); };
+      const onFocus = ()=>{ broadcastStopToHost(); };
+      const onResume = ()=>{ broadcastStopToHost(); };
+
+      document.addEventListener("visibilitychange", onHidden);
+      window.addEventListener("pagehide", onPageHide);
+      window.addEventListener("blur", onBlur);
+      document.addEventListener("freeze", onFreeze);
+
+      document.addEventListener("visibilitychange", onVisible);
+      window.addEventListener("focus", onFocus);
+      document.addEventListener("resume", onResume);
+
+      return ()=> {
+        document.removeEventListener("visibilitychange", onHidden);
+        window.removeEventListener("pagehide", onPageHide);
+        window.removeEventListener("blur", onBlur);
+        document.removeEventListener("freeze", onFreeze);
+        document.removeEventListener("visibilitychange", onVisible);
+        window.removeEventListener("focus", onFocus);
+        document.removeEventListener("resume", onResume);
+      };
+    }, []);
+
     const minuteOptions = [15, 36, 45];
 
+    // ---------------- RENDER ----------------
     return (
       React.createElement(React.Fragment, null,
 
@@ -767,6 +672,37 @@
               )
             )
           )
+        )
+      )
+    );
+  }
+
+  // ---------------- CUSTOM DROPDOWN ----------------
+  function Dropdown({ value, options, onChange, busy }) {
+    const [open, setOpen] = useState(false);
+    const ref = useRef(null);
+    useEffect(()=>{
+      const onDoc = e => { if (!ref.current) return; if (!ref.current.contains(e.target)) setOpen(false); };
+      document.addEventListener("click", onDoc);
+      return () => document.removeEventListener("click", onDoc);
+    },[]);
+    return (
+      React.createElement("div", { className:"dd", ref },
+        React.createElement("button", { className:"ddBtn", onClick:()=>setOpen(o=>!o), "aria-expanded":open, "aria-haspopup":"listbox" },
+          React.createElement("span", { className:"ddValue" }, value || "—"),
+          React.createElement("span", { className:"arrow" })
+        ),
+        open && React.createElement("div", { className:"ddList", role:"listbox" },
+          busy ? React.createElement("div", { className:"ddLoading" }, React.createElement("div",{className:"spinner"}), "Loading…")
+               : options.map(opt =>
+                  React.createElement("div", {
+                    key:String(opt),
+                    role:"option",
+                    "aria-selected": String(opt)===String(value),
+                    className:"ddItem"+(String(opt)===String(value)?" sel":""),
+                    onClick:()=>{ onChange(String(opt)); setOpen(false); }
+                  }, String(opt))
+                )
         )
       )
     );
