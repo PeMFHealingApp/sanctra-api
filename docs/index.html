@@ -2,10 +2,28 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
+  <!-- Disable zoom; allow safe area -->
   <meta name="viewport"
-      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+        content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
   <meta name="robots" content="noindex,nofollow" />
   <title>Sanctra IR</title>
+
+  <!-- Prevent pinch / double-tap / wheel-zoom -->
+  <script>
+  (function () {
+    const block = e => e.preventDefault();
+    document.addEventListener('gesturestart', block, { passive:false });
+    document.addEventListener('gesturechange', block, { passive:false });
+    document.addEventListener('gestureend', block, { passive:false });
+    let lastEnd = 0;
+    document.addEventListener('touchend', e => {
+      const now = Date.now();
+      if (now - lastEnd <= 350) e.preventDefault();
+      lastEnd = now;
+    }, { passive:false });
+    window.addEventListener('wheel', e => { if (e.ctrlKey) e.preventDefault(); }, { passive:false });
+  })();
+  </script>
 
   <!-- Quicksand -->
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -18,11 +36,14 @@
 
   <meta name="theme-color" content="#0b0b0b" />
   <link rel="stylesheet" href="style.css?v=2025-09-07-7" />
+
+  <!-- Tiny CSS helper so taps don't trigger zoom on some Androids -->
+  <style>html,body{touch-action:manipulation}</style>
 </head>
 
 <body>
-  <!-- Hidden audio used to grab Android audio focus (the “mp3 trick”) -->
-  <audio id="focusKiller" src="./silence.mp3" preload="auto" playsinline style="display:none"></audio>
+  <!-- Hidden audio used to grab native audio focus -->
+  <audio id="pemfFocus" src="./silence.mp3" preload="auto" playsinline style="display:none"></audio>
 
   <div id="root"></div>
 
@@ -110,35 +131,23 @@
     };
   };
 
-  // ---------------- ANDROID AUDIO-FOCUS “MP3 TRICK” ----------------
-  let FOCUS_CLAIMING = false;
-  async function claimAndroidAudioFocus() {
-    // Only try on Android, and avoid overlapping attempts
-    if (!/Android/i.test(navigator.userAgent) || FOCUS_CLAIMING) return;
-    const el = document.getElementById("focusKiller");
-    if (!el) return;
-    try {
-      FOCUS_CLAIMING = true;
-      el.currentTime = 0;
-      // Use an actually silent MP3 (all zeros) so it's inaudible but still counts as media
-      el.muted = false;        // must NOT be muted to claim focus on some devices
-      el.volume = 1.0;         // file is silent, so volume is safe
-      await el.play();         // requires user gesture when not muted—OK on Play click
-      setTimeout(()=>{ try{ el.pause(); }catch{} FOCUS_CLAIMING=false; }, 320);
-    } catch {
-      FOCUS_CLAIMING = false;
-    }
-  }
-
   // ---------------- HOST APP BRIDGE ----------------
-  function broadcastStopToHost(tryGrabAndroidFocus=false) {
+  function broadcastStopToHost() {
     try {
-      // Send both casings for safety across implementations
       window.parent.postMessage({ type: "pemf_stop_all_audio" }, "*");
       window.parent.postMessage({ type: "PEMF_STOP_ALL_AUDIO" }, "*");
     } catch {}
-    // If requested, also grab Android audio focus via silent MP3
-    if (tryGrabAndroidFocus) claimAndroidAudioFocus();
+  }
+
+  // Play a tiny silent mp3 to seize native audio focus (Android/iOS)
+  async function requestAudioFocus() {
+    try {
+      const a = document.getElementById('pemfFocus');
+      if (!a) return;
+      a.currentTime = 0;
+      await a.play();                        // must run in user-gesture (our Play button)
+      setTimeout(() => { try { a.pause(); } catch {} }, 1200);
+    } catch {}
   }
 
   // ---------------- AUDIO ENGINE ----------------
@@ -158,10 +167,8 @@
       if (!this.context){
         const AC = window.AudioContext || window.webkitAudioContext;
         this.context = new AC({ latencyHint:"playback" });
-        // Master gain into brickwall-like limiter, then destination
         this.master = this.context.createGain();
-        // ceiling -1 dB => linear ≈ 0.89125
-        const ceiling = 0.89125;
+        const ceiling = 0.89125; // -1dB linear
         this.master.gain.value = ceiling;
         const comp = this.context.createDynamicsCompressor();
         comp.threshold.value = -3;
@@ -172,12 +179,13 @@
         this.limiter = comp;
         this.master.connect(this.limiter).connect(this.context.destination);
 
-        // Auto-resume on visibility
         document.addEventListener("visibilitychange", () => {
           if (document.visibilityState === "visible" && this.context && this.context.state !== "running") {
             this.context.resume();
           }
         }, { passive:true });
+        window.addEventListener("pagehide", ()=>this.stop(), { passive:true });
+        window.addEventListener("beforeunload", ()=>this.stop(), { passive:true });
       }
       if (this.context.state === "suspended") await this.context.resume();
     }
@@ -186,29 +194,19 @@
     }
     stop(){
       if (this.nodes){
-        const { oscL, oscR, mod, noiseSrc, modalBank, wet, dry, convolver } = this.nodes;
+        const { oscL, oscR, mod, noiseSrc, modalBank } = this.nodes;
         [oscL,oscR,mod,noiseSrc].forEach(n=>{ try{ n && n.stop(); }catch{} });
-        try { wet && wet.disconnect(); } catch {}
-        try { dry && dry.disconnect(); } catch {}
-        try { convolver && convolver.disconnect(); } catch {}
         modalBank && modalBank.forEach(m=>{ try{ m.src.stop(); }catch{} });
       }
       this.nodes = null;
       cancelAnimationFrame(this._raf); this._raf=null;
     }
     async hardClose(){
-      // Full teardown to avoid orphaned playback in Android WebView
       this.stop();
       if (this.master) { try { this.master.disconnect(); } catch {} }
       if (this.limiter) { try { this.limiter.disconnect(); } catch {} }
-      try {
-        if (this.context && this.context.state !== "closed") {
-          await this.context.close();
-        }
-      } catch {}
-      this.context = null;
-      this.master = null;
-      this.limiter = null;
+      try { if (this.context && this.context.state !== "closed") await this.context.close(); } catch {}
+      this.context = null; this.master = null; this.limiter = null;
     }
     _num(o, keys, d=0){ for (const k of keys){ if (o && o[k]!=null && isFinite(o[k])) return Number(o[k]); } return d; }
 
@@ -237,7 +235,6 @@
       const L = buf.getChannelData(0), R = buf.getChannelData(1);
       const preN = Math.floor(preDelay * sr);
 
-      // Early reflections
       const earlyScale = 1 - earlyLateBalance;
       taps.forEach(t=>{
         const tSec = this._num(t,["time_s","t","delay_s","time"],0);
@@ -253,7 +250,6 @@
         }
       });
 
-      // Helpers
       const nearestRT = f=>{
         if (!bands.length) return maxRT;
         let best = bands[0], bd = Math.abs(f - (best.center_hz || best.freq_hz || best.hz || 500));
@@ -268,7 +264,6 @@
       const itdl = Math.floor(0.0006 * sr) * stereoWidth;
       const lpAlpha = hfRolloffHz > 0 ? Math.exp(-(Math.PI*2) * hfRolloffHz / sr) : 0;
 
-      // Late modal tail
       modes.slice(0,256).forEach(m=>{
         const f = Math.max(25, Number(m.freq_hz ?? m.f ?? m.freq ?? 0));
         if (!isFinite(f) || f<=0) return;
@@ -287,7 +282,6 @@
         }
       });
 
-      // LFE bloom
       if (lfeGain>0){
         let al=0, ar=0; const k = 0.0005 * lfeGain;
         for (let n=0;n<len;n++){
@@ -296,14 +290,13 @@
         }
       }
 
-      // Fade & normalize with headroom
       const fade = Math.min(Math.floor(len*0.12), Math.floor(sr*0.8));
       let peak = 0;
       for (let n=0;n<len;n++){
         if (n > len - fade){ const t = (n - (len - fade)) / fade; const w = 1 - t; L[n]*=w; R[n]*=w; }
         peak = Math.max(peak, Math.abs(L[n]), Math.abs(R[n]));
       }
-      const norm = peak>0 ? Math.min(0.88/peak, 2.0) : 1;
+      const norm = peak>0 ? Math.min(0.88/peak, 2.0) : 1; // headroom before limiter
       for (let n=0;n<len;n++){ L[n]*=norm; R[n]*=norm; }
       return buf;
     }
@@ -359,7 +352,6 @@
       const nGain = ctx.createGain(); nGain.gain.value = Math.max(0, program.pink_noise_gain);
       noiseSrc.connect(nGain).connect(merger);
 
-      // Modal sparkles
       const modal = [];
       const modes = Array.isArray(irJson?.modal_summary) ? irJson.modal_summary : [];
       modes.slice(0,48).forEach((m,i)=>{
@@ -418,8 +410,8 @@
     const totalTime = minutes * 60;
     const irRef = useRef(null);
 
-    function stopOtherAppAudio(){ broadcastStopToHost(true); } // <-- tryGrabAndroidFocus=true
-    useEffect(()=>{ stopOtherAppAudio(); },[]); // on load
+    function stopOtherAppAudio(){ broadcastStopToHost(); }
+    useEffect(()=>{ stopOtherAppAudio(); },[]); // stop host audio on load
 
     // Initial load with full-screen preloader
     useEffect(()=>{
@@ -454,7 +446,7 @@
       return ()=>{ alive=false; hardStopEverywhere(true); };
     },[]);
 
-    // Respond to country/site/minutes changes: stop current playback
+    // Stop current playback on changes
     useEffect(()=>{ if (isPlaying) stopAll(false, IS_ANDROID); }, [country]);
     useEffect(()=>{ if (isPlaying) stopAll(false, IS_ANDROID); }, [site]);
     useEffect(()=>{ if (isPlaying) stopAll(false, IS_ANDROID); }, [minutes]);
@@ -480,11 +472,11 @@
       return ()=>{ alive=false; };
     }, [site]);
 
-    function stopTimers(){ /* placeholder if you add timers later */ }
+    function stopTimers(){ /* reserved for future timers */ }
 
     async function hardStopEverywhere(collapse=false){
       try { stopTimers(); } catch {}
-      try { broadcastStopToHost(true); } catch {}
+      try { broadcastStopToHost(); } catch {}
       if (irRef.current){
         try { await irRef.current.hardClose(); } catch {}
         irRef.current = null;
@@ -513,7 +505,13 @@
 
     async function play(sendStop=true){
       if (!site) return;
-      if (sendStop) stopOtherAppAudio();           // <-- includes Android mp3 trick
+
+      // Grab native audio focus first, then notify host to stop mp3
+      if (sendStop) {
+        await requestAudioFocus();
+        stopOtherAppAudio();
+      }
+
       setPlayerOpen(true); setError("");
       try{
         setLoading(true);
@@ -559,14 +557,14 @@
 
     // -------- ANDROID LIFECYCLE GUARDS --------
     useEffect(()=>{
-      const onHidden = ()=>{ if (document.hidden) { broadcastStopToHost(true); hardStopEverywhere(true); } };
-      const onPageHide = ()=>{ broadcastStopToHost(true); hardStopEverywhere(true); };
-      const onBlur = ()=>{ if (IS_ANDROID) { broadcastStopToHost(true); hardStopEverywhere(true); } };
-      const onFreeze = ()=>{ broadcastStopToHost(true); hardStopEverywhere(true); };
+      const onHidden = ()=>{ if (document.hidden) { broadcastStopToHost(); hardStopEverywhere(true); } };
+      const onPageHide = ()=>{ broadcastStopToHost(); hardStopEverywhere(true); };
+      const onBlur = ()=>{ if (IS_ANDROID) { broadcastStopToHost(); hardStopEverywhere(true); } };
+      const onFreeze = ()=>{ broadcastStopToHost(); hardStopEverywhere(true); };
 
-      const onVisible = ()=>{ if (!document.hidden) broadcastStopToHost(true); };
-      const onFocus = ()=>{ broadcastStopToHost(true); };
-      const onResume = ()=>{ broadcastStopToHost(true); };
+      const onVisible = ()=>{ if (!document.hidden) broadcastStopToHost(); };
+      const onFocus = ()=>{ broadcastStopToHost(); };
+      const onResume = ()=>{ broadcastStopToHost(); };
 
       document.addEventListener("visibilitychange", onHidden);
       window.addEventListener("pagehide", onPageHide);
