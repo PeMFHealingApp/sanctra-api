@@ -2,8 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
+  <!-- disable zoom/pinch -->
   <meta name="viewport"
-  content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+        content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
   <meta name="robots" content="noindex,nofollow" />
   <title>Sanctra IR</title>
 
@@ -18,12 +19,15 @@
 
   <meta name="theme-color" content="#0b0b0b" />
 
-  <!-- Your separated CSS file (unchanged) -->
+  <!-- Your CSS (unchanged) -->
   <link rel="stylesheet" href="style.css?v=2025-09-07-8" />
 </head>
 
 <body>
   <div id="root"></div>
+
+  <!-- Hidden focus clip: REQUIRED for background keep-alive / audio focus -->
+  <audio id="pemfFocus" src="./silence.mp3" preload="auto" playsinline style="display:none"></audio>
 
   <!-- React -->
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
@@ -110,6 +114,25 @@
     };
   };
 
+  // ---------------- HOST BRIDGE ----------------
+  function broadcastStopToHost() {
+    try {
+      window.parent.postMessage({ type: "pemf_stop_all_audio" }, "*");
+      window.parent.postMessage({ type: "PEMF_STOP_ALL_AUDIO" }, "*");
+    } catch {}
+  }
+
+  // Claim native audio focus using the silent clip (must run in a user gesture)
+  async function requestAudioFocus() {
+    const el = document.getElementById('pemfFocus');
+    if (!el) return;
+    try {
+      el.currentTime = 0;
+      await el.play();
+      setTimeout(()=>{ try { el.pause(); } catch{} }, 1200);
+    } catch {}
+  }
+
   // ---------------- CUSTOM DROPDOWN ----------------
   function Dropdown({ value, options, onChange, busy }) {
     const [open, setOpen] = useState(false);
@@ -154,9 +177,11 @@
       this._raf = null;
       this.defaultProgram = { base_hz:200, binaural_split_hz:4, isotonic_rate_hz:0.25, pink_noise_gain:0.06 };
 
-      // iOS background pipe + IR variants for low-power mode
+      // background pipe
       this.pipeDest = null;
       this.pipeEl = null;
+
+      // low-power IR variants
       this._fullIR = null;
       this._shortIR = null;
     }
@@ -164,7 +189,7 @@
       if (!this.context){
         const AC = window.AudioContext || window.webkitAudioContext;
         this.context = new AC({ latencyHint:"playback" });
-        // Master gain into limiter into destination
+
         this.master = this.context.createGain();
         const ceiling = 0.89125; // -1 dB linear
         this.master.gain.value = ceiling;
@@ -176,54 +201,44 @@
         comp.attack.value = 0.002;
         comp.release.value = 0.10;
         this.limiter = comp;
-
         this.master.connect(this.limiter).connect(this.context.destination);
 
-        // Keep alive on focus
         document.addEventListener("visibilitychange", () => {
           if (document.visibilityState === "visible" && this.context.state !== "running") this.context.resume();
         }, { passive:true });
 
-        // Stop on leave
         window.addEventListener("pagehide", ()=>this.stop(), { passive:true });
         window.addEventListener("beforeunload", ()=>this.stop(), { passive:true });
       }
       if (this.context.state === "suspended") await this.context.resume();
     }
 
-    // iOS background pipe using a silent local asset
+    // Background pipe using the same silent asset
     async attachPipe(){
       await this.ensure();
       if (this.pipeDest) return;
 
-      let el = document.getElementById("bg-silence");
+      let el = this.pipeEl || document.getElementById('bg-silence');
       if (!el) {
-        el = document.createElement("audio");
-        el.id = "bg-silence";
-        el.src = "./silence.mp3"; // place in /docs
+        el = document.createElement('audio');
+        el.id = 'bg-silence';
+        el.src = './silence.mp3';
         el.loop = true;
-        el.preload = "auto";
-        el.setAttribute("playsinline", "");
-        el.setAttribute("webkit-playsinline", "");
-        el.crossOrigin = "anonymous";
-        el.style.display = "none";
+        el.preload = 'auto';
+        el.volume = 0.001;
+        el.setAttribute('playsinline','');
+        el.style.display = 'none';
         document.body.appendChild(el);
       }
       this.pipeEl = el;
-      try {
-        // very low volume so the pipeline stays active
-        el.volume = 0.001;
-        await el.play();
-      } catch(e) {
-        // if user gesture required, play() will succeed when called from the gesture handler
-      }
+
+      try { await el.play(); } catch {}
+
       try {
         const src = this.context.createMediaElementSource(el);
         src.connect(this.master);
         this.pipeDest = src;
-      } catch(e) {
-        // MediaElementSource can be created only once per element; ignore if already connected
-      }
+      } catch {}
     }
 
     setVolume(v){
@@ -331,7 +346,7 @@
         if (n > len - fade){ const t = (n - (len - fade)) / fade; const w = 1 - t; L[n]*=w; R[n]*=w; }
         peak = Math.max(peak, Math.abs(L[n]), Math.abs(R[n]));
       }
-      const norm = peak>0 ? Math.min(0.88/peak, 2.0) : 1;
+      const norm = peak>0 ? Math.min(0.88/peak, 2.0) : 1; // leave headroom before limiter
       for (let n=0;n<len;n++){ L[n]*=norm; R[n]*=norm; }
       return buf;
     }
@@ -366,9 +381,7 @@
       const convolver = ctx.createConvolver(); 
       convolver.normalize = true; 
       convolver.buffer = irBuffer;
-      // remember full IR
-      this._fullIR = irBuffer;
-      this._shortIR = null;
+      this._fullIR = irBuffer; this._shortIR = null;
 
       const wet = ctx.createGain(); wet.gain.value = 1.0;
       const dry = ctx.createGain(); dry.gain.value = 0.0;
@@ -401,7 +414,7 @@
         const g = Number(m.gain ?? m.g ?? m.amp ?? m.a ?? 0.15);
         const src = ctx.createOscillator(); src.type = "sine"; src.frequency.value = f;
         const gn = ctx.createGain(); gn.gain.value = 0.10 * g;
-        gn._baseGain = g; // store base
+        gn._baseGain = g;
         src.connect(gn).connect(merger, 0, i%2);
         modal.push({src, gn});
       });
@@ -484,8 +497,8 @@
     const totalTime = minutes * 60;
     const irRef = useRef(null);
 
-    function stopOtherAppAudio(){ try{ window.parent.postMessage({ type:"pemf_stop_all_audio" }, "*"); }catch{} }
-    useEffect(()=>{ stopOtherAppAudio(); },[]);
+    function stopOtherAppAudio(){ broadcastStopToHost(); }
+    useEffect(()=>{ stopOtherAppAudio(); },[]); // stop GoodBarber stream on load
 
     // Initial load
     useEffect(()=>{
@@ -600,9 +613,13 @@
 
     async function play(sendStop=true){
       if (!site) return;
-      if (sendStop) stopOtherAppAudio();
-      setPlayerOpen(true); setError("");
 
+      if (sendStop) {
+        await requestAudioFocus(); // claim native focus first
+        stopOtherAppAudio();       // tell GoodBarber to stop its MP3 stream
+      }
+
+      setPlayerOpen(true); setError("");
       try{
         setLoading(true);
 
@@ -610,12 +627,11 @@
         irRef.current = new IREngine();
         const eg = irRef.current;
 
-        // Ensure context and immediately start the iOS background pipe within this gesture
         await eg.ensure();
-        await eg.attachPipe();
+        await eg.attachPipe();     // keep WebAudio alive in background
 
-        eg.loop = loop; 
-        eg.setVolume(volume); 
+        eg.loop = loop;
+        eg.setVolume(volume);
         eg.onUpdate = tick;
 
         const resp = await fetch(ENDPOINTS.genIR, {
